@@ -1,0 +1,36 @@
+{
+  "agent_count": 3,
+  "mode": "live",
+  "models": {},
+  "leader": null,
+  "temperature": 0.7,
+  "call_limit": 24,
+  "max_output_tokens": 16000,
+  "enabled_tools": [
+    "list_files",
+    "read_file",
+    "read_board",
+    "post_note",
+    "submit_answer"
+  ],
+  "agent_tools": {},
+  "agent_prompts": {},
+  "title": "Technical example · free task",
+  "scenario": "custom",
+  "restricted": [],
+  "custom_question": "Combine the pieces held by the participants in agent-number order and submit the combined code.",
+  "common_prompt": "Work together on the task. Share useful information through the notes board.",
+  "workspace_files": {
+    "agent_01": {
+      "note.txt": "Your piece is BLUE"
+    },
+    "agent_02": {
+      "note.txt": "Your piece is 7"
+    },
+    "agent_03": {
+      "note.txt": "Your piece is K"
+    }
+  },
+  "board_delivery": "tool_only",
+  "answer_policy": "none"
+}

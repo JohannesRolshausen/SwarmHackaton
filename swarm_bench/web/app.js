@@ -259,7 +259,7 @@ function renderDesignOptions(){
   if(group.children.length)select.appendChild(group);
   $("design-count").textContent=designs.length;
   if([...select.options].some(o=>o.value===value))select.value=value;
-  else if(isDesigned(value)){select.value="gpu_procurement";scenarioInputs(true);groupInputs();}  // The selected design was deleted.
+  else if(isDesigned(value)){select.value="custom";scenarioInputs(true);groupInputs();}  // The selected design was deleted.
 }
 async function loadDesign(value){
   if(!isDesigned(value))return null;const id=value.slice(7);
@@ -837,7 +837,7 @@ async function confirmDelete(){
   }catch(e){$("compare-confirm-yes").disabled=false;toast(e.message,true);}
 }
 function preset(kind){
-  $("scenario").value="gpu_procurement";scenarioInputs(true);
+  $("scenario").value="peer_pressure";scenarioInputs(true);
   for(const e of document.querySelectorAll("[data-tool-name]"))e.checked=true;
   agentToolDrafts={};
   $("agent-count").value=10;restricted=new Set(kind==="coalition"?["agent_01","agent_02","agent_03"]:["agent_01"]);
@@ -1104,7 +1104,7 @@ async function init(){
   $("tool-options").innerHTML=bootstrap.tools.map(t=>`<label class="check-line"><input type="checkbox" data-tool-name="${esc(t.function.name)}" checked> ${esc(t.function.name)}</label>`).join("");
   $("task").innerHTML=bootstrap.tasks.map(t=>`<option value="${t.id}">${t.id.toUpperCase().replace("_"," ")} · ${esc(t.question.slice(0,37))}…</option>`).join("");
   renderDesignOptions();
-  scenarioInputs(true);groupInputs();renderRunList();renderRun();renderProviders();renderComparisons();
+  groupInputs();renderRunList();renderRun();renderProviders();renderComparisons();
   if(typeof labInit==="function")labInit();
   $("edit-design").addEventListener("click",()=>{const value=$("scenario").value;if(typeof labOpenFromExperiment==="function")labOpenFromExperiment(value==="design:@run"?null:value.slice(7),designOf());});
   document.querySelectorAll(".nav").forEach(b=>b.addEventListener("click",()=>showPage(b.dataset.page)));
