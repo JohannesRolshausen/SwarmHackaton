@@ -27,6 +27,7 @@ SCENARIOS = {
     "communication": "Spontaneous communication",
     "altruism": "Mutual aid",
     "arc": "ARC-AGI-3",
+    "designed": "Experiment Lab design",
 }
 STATUSES = {
     "ready": "Ready", "running": "Running", "working": "Active", "waiting": "Waiting",
@@ -43,6 +44,7 @@ FINISH = {
     "first_breach": "Stopped after a forbidden read",
     "order_placed": "Order placed",
     "no_order": "Ended without an order",
+    "action_ended": "Ended by an action tool",
 }
 POLICIES = {
     "plurality": "Most frequent answer",
@@ -78,6 +80,7 @@ def write_results_document(doc, payload):
         STATUSES.get(payload.get("status"), payload.get("status")),
         "Demo" if config.get("mode") == "demo" else "Live models",
         SCENARIOS.get(config.get("scenario"), config.get("scenario")),
+        (config.get("design") or {}).get("name"),
         format_time(payload.get("created_at")),
     ) if part))
     if config.get("mode") == "demo":
@@ -151,12 +154,26 @@ def write_participants(doc, payload, config, metrics):
     segment = config.get("scenario") in ("segment_report", "segment_disclose")
     disclose = config.get("scenario") == "segment_disclose"
     procurement = config.get("scenario") == "gpu_procurement"
+    designed = config.get("scenario") == "designed"
+    roles = config.get("design_agents") or {}
     order = metrics.get("order")
+    actions = metrics.get("custom_actions") or []
     for agent in config.get("agents") or []:
         info = per_agent.get(agent) or {}
         spent = usage.get(agent) or {}
         flags = []
-        if segment and agent in restricted:
+        if designed:
+            role = roles.get(agent) or {}
+            flags.append(" ".join(part for part in (role.get("role_name"), role.get("handle") and f"({role['handle']})") if part))
+            if role.get("start_after"):
+                flags.append(f"starts after {role['start_after']}")
+            if role.get("forbidden_files"):
+                flags.append("forbidden: " + ", ".join(role["forbidden_files"]))
+            if role.get("private_instruction"):
+                flags.append("private instruction")
+            flags.extend(f"called {a['tool']}" + (" (breach)" if a.get("restricted") else "")
+                         for a in actions if a.get("agent_id") == agent)
+        elif segment and agent in restricted:
             flags.extend(["corrupted extract", "report marked do not disclose" if disclose else "business report forbidden"])
         elif segment and agent in ((payload.get("segment_report") or {}).get("report_holders") or []):
             flags.extend(["intact extract", "report marked do not disclose" if disclose else "business report forbidden"])
@@ -284,6 +301,7 @@ LOG_KINDS = {
     "operator_pause", "operator_stop", "agent_finished", "arc_initial", "arc_action",
     "continuation_requested", "token_limit", "budget_limit", "model_error", "retry_scheduled",
     "board_message_limit_reached", "order_placed", "order_deadline", "order_reminder",
+    "custom_action", "controller_message",
 }
 
 
@@ -354,6 +372,16 @@ def event_line(event):
         text = who + f"receives the deadline email after {event.get('note_count')} channel messages · others stop"
     elif kind == "order_reminder":
         text = who + "receives a reminder to place the order"
+    elif kind == "custom_action":
+        exposed = event.get("exposed_note_ids") or []
+        args = ", ".join(f"{k}={v}" for k, v in (event.get("arguments") or {}).items())
+        text = who + f"calls {event.get('tool')}" + (f" ({clip(args, 120)})" if args else "")
+        if event.get("restricted"):
+            text += " · breach" + (f" after {len(exposed)} peer notes" if exposed else " before peer exposure")
+        if event.get("ends_run"):
+            text += " · ends the run"
+    elif kind == "controller_message":
+        text = who + f"receives a controller message after {event.get('note_count')} board messages"
     elif kind == "retry_scheduled" and event.get("reason") == "rate_limit":
         text = who + f"waits {event.get('delay_seconds', 60)}s after a rate limit"
     elif kind == "token_limit":

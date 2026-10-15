@@ -44,6 +44,11 @@ def check_provider_error(data, usage=None):
                             diagnostic={**response_diagnostic(data), "provider_error_code": code})
 
 
+def thinking_always_on(model):
+    """Google: reasoning cannot be turned off for Gemini 2.5 Pro or Gemini 3 models."""
+    return re.match(r"(models/|google/)?gemini-(3|2\.5-pro)", model or "") is not None
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Do not forward an API credential to a redirected origin.
@@ -147,6 +152,8 @@ class ProviderRegistry:
             raise ValueError("Invalid reasoning setting")
         if profile["kind"] == "anthropic" and profile["reasoning_effort"]:
             raise ValueError("This reasoning setting uses the OpenAI-compatible format")
+        if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
+            raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -444,8 +451,11 @@ def _store_reasoning(msg, text, kind):
         msg["reasoning_kind"] = kind
 
 
-def completion(profile, key, messages, tools, output_budget, temperature=None):
-    """One HTTP completion; caller owns tool execution and bounded iteration."""
+def completion(profile, key, messages, tools, output_budget, temperature=None, wire=None):
+    """One HTTP completion; caller owns tool execution and bounded iteration.
+
+    ``wire`` is an optional ``WireExchange`` that records the request and response as sent and read.
+    """
     # Internal Swarm Lab delivery metadata is for audit/exposure accounting only.
     # It must never be sent as an unknown chat-message field to a provider.
     provider_messages = relay_messages(messages, profile["kind"])
@@ -501,20 +511,33 @@ def completion(profile, key, messages, tools, output_budget, temperature=None):
     headers["Content-Type"] = "application/json"
     request = Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST")
     # Independent agents may queue behind one local GPU inference worker.
-    timeout = 600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1") else 45
+    # A remote thinking model sends nothing until its whole answer is ready, so the
+    # wait grows with the output budget: 60 s of queueing plus 50 tokens per second.
+    timeout = (600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1")
+               else min(600, 60 + output_budget // 50))
+    handlers = [NoRedirect()] + ([wire.tap(timeout, key)] if wire is not None else [])
     try:
-        with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+        with build_opener(*handlers).open(request, timeout=timeout) as response:
             raw = response.read(4_000_001)
+            if wire is not None:
+                wire.received(response.status, response.reason, response.headers, raw)
             if len(raw) > 4_000_000:
                 raise ProviderError("Provider response too large")
             data = json.loads(raw)
     except HTTPError as exc:
+        if wire is not None:
+            wire.http_error(exc)
         # Never echo the response body, URL or headers: a gateway may reflect a key.
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
                             retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic={"http_status": exc.code}) from None
-    except TimeoutError:
-        raise ProviderError(f"Provider did not respond within {timeout} seconds.") from None
-    except (URLError, OSError, ValueError):
+    except TimeoutError as exc:
+        if wire is not None:
+            wire.failed("timeout", exc)
+        raise ProviderError(f"Provider did not respond within {timeout} seconds.", retryable=True,
+                            diagnostic={"timeout_seconds": timeout}) from None
+    except (URLError, OSError, ValueError) as exc:
+        if wire is not None and not isinstance(exc, ValueError):
+            wire.failed("connection failed", exc)
         raise ProviderError("Connection failed or invalid JSON from provider") from None
     if not isinstance(data, dict):
         raise ProviderError("Response format incompatible with the chosen profile")

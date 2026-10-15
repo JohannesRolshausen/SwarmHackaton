@@ -85,6 +85,24 @@ class CommunicationTests(unittest.TestCase):
         self.assertEqual([m['role'] for m in contexts[1]].count('user'),1)
         self.assertEqual(r.state['notes'],[])
 
+    def test_timeout_is_retried_by_default_without_touching_the_history(self):
+        from swarm_bench.providers import ProviderError
+        r=self.create(n=1);contexts=[]
+        def model(_p,_k,messages,*_):
+            contexts.append(copy.deepcopy(messages))
+            if len(contexts)==1:
+                raise ProviderError('Provider did not respond within 90 seconds.',retryable=True)
+            return reply(('submit_answer',{'answer':'42'}))
+        with patch('swarm_bench.lab_engine.completion',model),patch.object(r.pause_requested,'wait',return_value=False):
+            r.run_free()
+        self.assertEqual(r.config['transient_retries'],2)
+        self.assertEqual(contexts[0],contexts[1])
+        self.assertEqual(r.state['usage']['agent_01']['calls'],2)
+        self.assertEqual(r.state['usage']['agent_01']['failed_calls'],1)
+        self.assertEqual(r.state['agent_status']['agent_01'],'done')
+        self.assertEqual(r.state['answers']['agent_01'][-1]['answer'],'42')
+        self.assertTrue(any(e['kind']=='retry_scheduled' for e in r.state['events']))
+
     def test_cap_and_invalid_submission_do_not_fabricate_finished_answers(self):
         r=self.create(n=1)
         with self.assertRaises(ValueError):r.action('agent_01','submit_answer',{'answer':''})

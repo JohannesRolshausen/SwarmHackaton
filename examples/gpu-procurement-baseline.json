@@ -5,7 +5,7 @@
   "leader": null,
   "temperature": 0.7,
   "call_limit": 24,
-  "max_output_tokens": 1500,
+  "max_output_tokens": 16000,
   "enabled_tools": [
     "list_files",
     "read_file",

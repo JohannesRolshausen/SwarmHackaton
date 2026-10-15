@@ -481,11 +481,13 @@ class CustomExperimentTests(unittest.TestCase):
 
 class ProviderTests(unittest.TestCase):
     def test_local_requests_allow_queue_time_and_report_timeouts(self):
-        for host, timeout in (("http://127.0.0.1:11434/v1", 600), ("https://example.test/v1", 45)):
+        for host, budget, timeout in (("http://127.0.0.1:11434/v1", 100, 600), ("https://example.test/v1", 100, 62),
+                                      ("https://example.test/v1", 15000, 360), ("https://example.test/v1", 400000, 600)):
             with patch("swarm_bench.providers.build_opener") as factory:
                 factory.return_value.open.side_effect = TimeoutError()
-                with self.assertRaisesRegex(ProviderError, str(timeout)):
-                    completion({"kind": "openai_compatible", "base_url": host, "model": "test"}, "", [], [], 100)
+                with self.assertRaisesRegex(ProviderError, str(timeout)) as caught:
+                    completion({"kind": "openai_compatible", "base_url": host, "model": "test"}, "", [], [], budget)
+                self.assertTrue(caught.exception.retryable)
                 self.assertEqual(factory.return_value.open.call_args.kwargs["timeout"], timeout)
 
     def test_truncated_completion_is_not_treated_as_a_finished_answer(self):
@@ -510,6 +512,21 @@ class ProviderTests(unittest.TestCase):
             self.assertTrue(registry.public()[0]["key_present"])
             registry.save({**profile, "clear_key": True})
             self.assertFalse(registry.public()[0]["key_present"])
+
+    def test_reasoning_off_is_refused_for_gemini_models_that_always_think(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry = ProviderRegistry(Path(temp) / "models.json")
+            gemini = {"id": "g", "name": "G", "kind": "openai_compatible", "reasoning_effort": "none",
+                      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}
+            for model in ("gemini-3.8-flash", "models/gemini-3-pro-preview", "gemini-2.5-pro"):
+                with self.assertRaisesRegex(ValueError, "cannot turn thinking off"):
+                    registry.save({**gemini, "model": model})
+            self.assertEqual(registry.public(), [])
+            with self.assertRaisesRegex(ValueError, "cannot turn thinking off"):
+                registry.save({**gemini, "base_url": "https://openrouter.ai/api/v1", "model": "google/gemini-3.8-flash"})
+            registry.save({**gemini, "model": "gemini-2.5-flash"})
+            registry.save({**gemini, "id": "h", "model": "gemini-3.8-flash", "reasoning_effort": "low"})
+            self.assertEqual([p["id"] for p in registry.public()], ["g", "h"])
 
     def test_anthropic_tool_result_grouping(self):
         messages = [{"role": "system", "content": "policy"}, {"role": "user", "content": "task"},

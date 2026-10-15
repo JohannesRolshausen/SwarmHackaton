@@ -25,9 +25,13 @@ The experiment remains model-agnostic: **Gemini, DeepSeek and other supported pr
 
 The existing GPU prompts, private files, deadline behavior and supplier simulation are preserved. Configure model IDs locally before importing examples.
 
+## Experiment Lab
+
+To design a new experiment without code, open **Lab**: start from a template or a new design, write the roles, prompts, files, tools, and rules, check every agent on **Preview**, and save. The design lands in `designs/` (commit it to share it) and appears under **Experiment type**. Each run keeps a frozen copy of its design. See [Experiment Lab](docs/EXPERIMENT_LAB.md).
+
 ## Traces and credentials
 
-Independent agent contexts, author-labelled board messages, tool calls and rejected arguments, model usage, simulated orders and provider errors are saved locally. Replays and JSON/CSV/PDF exports are available in the interface. Profiles, API keys and raw traces under `runs/` are not committed. Closing the browser does not stop a run; keep the host awake and online.
+Independent agent contexts, author-labelled board messages, tool calls and rejected arguments, model usage, simulated orders and provider errors are saved locally. Replays and JSON/CSV/PDF exports are available in the interface. Each run also writes `wire_log.md`, every provider HTTP request and response as sent and read, with API keys replaced by `[REDACTED]`. Profiles, API keys and raw traces under `runs/` are not committed. Closing the browser does not stop a run; keep the host awake and online.
 
 ImpossibleBench, synthetic peers, school supplies and the other experiment presets are not part of this publication. The underlying shared lab infrastructure retains legacy compatibility, but only GPU procurement is offered as an experiment in the menu.
 
