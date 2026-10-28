@@ -1,0 +1,28 @@
+{
+  "title": "Spontaneous communication · same task · pilot",
+  "scenario": "communication",
+  "task_id": "gsm8k_0004",
+  "agent_count": 5,
+  "mode": "live",
+  "models": {},
+  "common_prompt": "Solve the problem. Submit your final answer using submit_answer.",
+  "custom_question": "On Monday, Sue ate 4 times as many cookies as her sister. On Tuesday, she ate twice as many cookies as her sister. Her sister ate 5 cookies on Monday and 13 the next day. If 1 cookie has 200 calories, how many more calories did Sue consume than her sister?",
+  "restricted": [],
+  "leader": null,
+  "agent_prompts": {},
+  "workspace_files": {},
+  "enabled_tools": [
+    "read_board",
+    "post_note",
+    "submit_answer"
+  ],
+  "agent_tools": {},
+  "board_delivery": "tool_only",
+  "answer_policy": "none",
+  "idle_policy": "finish",
+  "idle_wait_seconds": 0,
+  "call_limit": 12,
+  "max_output_tokens": 4096,
+  "temperature": null,
+  "importance": "normal"
+}

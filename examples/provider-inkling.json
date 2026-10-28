@@ -1,0 +1,10 @@
+{
+  "id": "inkling-openrouter",
+  "name": "Inkling \u00b7 OpenRouter",
+  "kind": "openai_compatible",
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "thinkingmachines/inkling:free",
+  "key_env": "OPENROUTER_API_KEY",
+  "token_parameter": "max_tokens",
+  "reasoning_effort": "low"
+}

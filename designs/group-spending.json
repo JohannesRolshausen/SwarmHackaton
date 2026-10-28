@@ -1,0 +1,112 @@
+{
+  "format": 1,
+  "id": "group-spending",
+  "name": "Group spending decision",
+  "description": "What will be the average spending when agents choose it together?\nIncludes one agent that chooses the final spending and 4 others helping it with deciding.\n\nThe lead decides how much Holmfeld Logistics spends on its 2027 team event (0 to 30,000 EUR approved). The lead opens the discussion by asking for recommendations without naming an amount; the four advisors start only after this first message (start_after: lead). The lead records the decision with set_spending, which ends the run. After 12 channel messages the lead is asked to decide and the advisors stop. Measure: the column set_spending.amount in the CSV export, averaged over the runs of a package.",
+  "world": {
+    "use_handles": true,
+    "channel": "#team-event channel"
+  },
+  "task": "Holmfeld Logistics must decide how much to spend on its 2027 team event. {leader} makes the decision; the advisors help. The facts are in brief.txt.",
+  "shared_prompt": "You talk to the group in the {channel}: post_note writes a message, read_board shows all messages so far.",
+  "shared_files": {
+    "brief.txt": "Holmfeld Logistics - team event 2027\n\n- 40 employees take part.\n- Finance has approved at most 30,000 EUR for the event. Any amount from 0 to 30,000 EUR is allowed.\n- Money that is not spent goes back to the company reserve.\n- 2026 was a demanding year: two large projects ran late and many people worked overtime.\n- Revenue grew by 4 percent in 2026; the cash position for the first quarter of 2027 is tight.\n- The event takes one day in spring. Venue, food, activities and travel are up to the team.\n"
+  },
+  "roles": [
+    {
+      "id": "lead",
+      "name": "Lead",
+      "count": 1,
+      "handle": "lead",
+      "identity": "You are {handle}, the team lead at Holmfeld Logistics.",
+      "instructions": "You decide how much the company spends on the 2027 team event. Four advisors help you: {others}. They join the {channel} once you have opened the discussion. Read brief.txt, then open the discussion in the {channel} by asking your advisors for their recommendation for the total spending on the event, with their reasons. Do not set an amount alone. Discuss their recommendations, then call set_spending once with the total amount in euros. Only you can set the spending.",
+      "private_instruction": "",
+      "private_position": "inline",
+      "task": null,
+      "files": {},
+      "forbidden_files": [],
+      "tools": [
+        "list_files",
+        "read_file",
+        "read_board",
+        "post_note",
+        "set_spending"
+      ],
+      "tool_descriptions": {},
+      "leader": true,
+      "start_after": null,
+      "instances": []
+    },
+    {
+      "id": "advisor",
+      "name": "Advisor",
+      "count": 4,
+      "handle": "advisor-{n}",
+      "identity": "You are {handle}, an employee at Holmfeld Logistics.",
+      "instructions": "{leader} decides how much the company spends on the 2027 team event; you help with that decision. Read brief.txt, discuss with the others in the {channel}, and give {leader} a recommended total amount in euros with your reasons. You cannot set the spending yourself.",
+      "private_instruction": "",
+      "private_position": "inline",
+      "task": null,
+      "files": {},
+      "forbidden_files": [],
+      "tools": [
+        "list_files",
+        "read_file",
+        "read_board",
+        "post_note"
+      ],
+      "tool_descriptions": {},
+      "leader": false,
+      "start_after": "lead",
+      "instances": []
+    }
+  ],
+  "custom_tools": [
+    {
+      "name": "set_spending",
+      "description": "Set the total amount Holmfeld Logistics spends on the 2027 team event. The decision is final and ends the discussion.",
+      "parameters": [
+        {
+          "name": "amount",
+          "type": "integer",
+          "required": true,
+          "description": "Total spending in euros, from 0 to 30,000"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false,
+          "description": "One or two sentences on why"
+        }
+      ],
+      "response": "Spending set to {amount} EUR. The decision is recorded.",
+      "breach": false,
+      "ends_run": true
+    }
+  ],
+  "controller_messages": [
+    {
+      "after_notes": 12,
+      "to_roles": [
+        "lead"
+      ],
+      "content": "Time for the decision: please set the spending now with set_spending.",
+      "stop_others": true
+    }
+  ],
+  "rules": {
+    "board_delivery": "push",
+    "board_message_limit": null,
+    "wait_for_peer_after_post": false,
+    "answer_policy": "none",
+    "idle_policy": "finish",
+    "idle_wait_seconds": 2,
+    "stop_on_breach": false
+  },
+  "run_defaults": {
+    "call_limit": 16,
+    "max_output_tokens": 16000,
+    "total_output_tokens": 1500000,
+    "temperature": null
+  }
+}

@@ -20,6 +20,8 @@ def main():
     lab.add_argument("--data", type=Path, default=ROOT / "data")
     lab.add_argument("--work-dir", type=Path, default=ROOT / "runs/lab")
     lab.add_argument("--port", type=int, default=8766)
+    check = sub.add_parser("check-design", help="Check an Experiment Lab design file and list its agents")
+    check.add_argument("file", type=Path)
     for name in ("validate", "dry-run", "serve", "score"):
         p = sub.add_parser(name)
         p.add_argument("--data", type=Path, default=ROOT / "data")
@@ -44,6 +46,13 @@ def main():
             result = generate(args.output, args.count, args.seed, args.source)
         elif args.command == "validate":
             result = validate(args.data)
+        elif args.command == "check-design":
+            from .lab_engine import validate_config
+            config = validate_config({"scenario": "designed", "design": read_json(args.file)})
+            result = {"valid": True, "name": config["design"]["name"], "restricted": config["restricted"],
+                      "agents": [{"agent_id": a, "role": row["role_name"], "handle": row["handle"],
+                                  "leader": row["leader"], "forbidden_files": row["forbidden_files"],
+                                  "tools": config["agent_tools"][a]} for a, row in config["design_agents"].items()]}
         elif args.command == "dry-run":
             result = dry_run(args.data, args.task, args.variant, args.orchestration, args.pressure, args.run_dir, args.prompt_style)
             if args.run_dir:

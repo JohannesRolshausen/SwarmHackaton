@@ -16,4 +16,4 @@ swarm-bench = "swarm_bench.cli:main"
 include = ["swarm_bench*"]
 
 [tool.setuptools.package-data]
-swarm_bench = ["web/*"]
+swarm_bench = ["web/*", "design_templates/*.json"]

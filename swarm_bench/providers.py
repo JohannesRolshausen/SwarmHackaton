@@ -44,6 +44,11 @@ def check_provider_error(data, usage=None):
                             diagnostic={**response_diagnostic(data), "provider_error_code": code})
 
 
+def thinking_always_on(model):
+    """Google: reasoning cannot be turned off for Gemini 2.5 Pro or Gemini 3 models."""
+    return re.match(r"(models/|google/)?gemini-(3|2\.5-pro)", model or "") is not None
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Do not forward an API credential to a redirected origin.
@@ -145,8 +150,10 @@ class ProviderRegistry:
             raise ValueError("Unknown provider format")
         if profile["reasoning_effort"] not in ("", "none", "low", "medium", "high", "xhigh", "max"):
             raise ValueError("Invalid reasoning setting")
-        if profile["kind"] == "anthropic" and profile["reasoning_effort"]:
-            raise ValueError("This reasoning setting uses the OpenAI-compatible format")
+        if profile["kind"] == "anthropic" and profile["reasoning_effort"] == "none":
+            raise ValueError("Anthropic Messages has no Off setting here. Choose Low for the least thinking")
+        if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
+            raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -444,8 +451,11 @@ def _store_reasoning(msg, text, kind):
         msg["reasoning_kind"] = kind
 
 
-def completion(profile, key, messages, tools, output_budget, temperature=None):
-    """One HTTP completion; caller owns tool execution and bounded iteration."""
+def completion(profile, key, messages, tools, output_budget, temperature=None, wire=None):
+    """One HTTP completion; caller owns tool execution and bounded iteration.
+
+    ``wire`` is an optional ``WireExchange`` that records the request and response as sent and read.
+    """
     # Internal Swarm Lab delivery metadata is for audit/exposure accounting only.
     # It must never be sent as an unknown chat-message field to a provider.
     provider_messages = relay_messages(messages, profile["kind"])
@@ -455,7 +465,15 @@ def completion(profile, key, messages, tools, output_budget, temperature=None):
                    "system": "\n\n".join(m["content"] for m in provider_messages if m["role"] == "system"),
                    "messages": anthropic_messages(provider_messages),
                    "tools": [{"name": t["function"]["name"], "description": t["function"]["description"],
-                              "input_schema": t["function"]["parameters"]} for t in tools]}
+                              "input_schema": t["function"]["parameters"]} for t in tools],
+                   # Each call resends the whole history, so cache the prefix up to the last block.
+                   "cache_control": {"type": "ephemeral"}}
+        # Without an effort the model keeps its own default (Opus 5.5: medium, Sonnet 5.5: high)
+        # and returns empty thinking blocks. With one, ask for adaptive thinking and a readable
+        # summary. Older models such as Haiku 4.5 reject adaptive thinking, so leave effort empty there.
+        if profile.get("reasoning_effort"):
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+            payload["output_config"] = {"effort": profile["reasoning_effort"]}
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
     elif profile["kind"] == "openai_responses":
         endpoint = profile["base_url"] + "/responses"
@@ -501,20 +519,33 @@ def completion(profile, key, messages, tools, output_budget, temperature=None):
     headers["Content-Type"] = "application/json"
     request = Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST")
     # Independent agents may queue behind one local GPU inference worker.
-    timeout = 600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1") else 45
+    # A remote thinking model sends nothing until its whole answer is ready, so the
+    # wait grows with the output budget: 60 s of queueing plus 50 tokens per second.
+    timeout = (600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1")
+               else min(600, 60 + output_budget // 50))
+    handlers = [NoRedirect()] + ([wire.tap(timeout, key)] if wire is not None else [])
     try:
-        with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+        with build_opener(*handlers).open(request, timeout=timeout) as response:
             raw = response.read(4_000_001)
+            if wire is not None:
+                wire.received(response.status, response.reason, response.headers, raw)
             if len(raw) > 4_000_000:
                 raise ProviderError("Provider response too large")
             data = json.loads(raw)
     except HTTPError as exc:
+        if wire is not None:
+            wire.http_error(exc)
         # Never echo the response body, URL or headers: a gateway may reflect a key.
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
                             retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic={"http_status": exc.code}) from None
-    except TimeoutError:
-        raise ProviderError(f"Provider did not respond within {timeout} seconds.") from None
-    except (URLError, OSError, ValueError):
+    except TimeoutError as exc:
+        if wire is not None:
+            wire.failed("timeout", exc)
+        raise ProviderError(f"Provider did not respond within {timeout} seconds.", retryable=True,
+                            diagnostic={"timeout_seconds": timeout}) from None
+    except (URLError, OSError, ValueError) as exc:
+        if wire is not None and not isinstance(exc, ValueError):
+            wire.failed("connection failed", exc)
         raise ProviderError("Connection failed or invalid JSON from provider") from None
     if not isinstance(data, dict):
         raise ProviderError("Response format incompatible with the chosen profile")
@@ -526,6 +557,14 @@ def completion(profile, key, messages, tools, output_budget, temperature=None):
                           "output_tokens": usage.get("output_tokens", usage.get("completion_tokens"))}
         reported_usage = {k: v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
                           for k, v in reported_usage.items()}
+        # Anthropic counts cached input apart from input_tokens. Keep input_tokens as the
+        # whole prompt, comparable with other providers, and report the cached part on its own.
+        if profile["kind"] == "anthropic" and reported_usage["input_tokens"] is not None:
+            for field in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    reported_usage[field] = value
+                    reported_usage["input_tokens"] += value
         details = usage.get("output_tokens_details", usage.get("completion_tokens_details"))
         reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) and reasoning_tokens >= 0:

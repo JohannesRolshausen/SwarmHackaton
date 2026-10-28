@@ -15,7 +15,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .common import ROOT, read_json, write_json
-from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, LabRun, agent_text_defaults, assemble_prompt, is_segment
+from .experiment_design import DESIGNS_DIR, DesignStore
+from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ALTRUISM_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, DESIGNED, LabRun, agent_text_defaults, assemble_prompt, is_segment
 from .lab_storage import atomic_json, load_run, save_run
 from .pdf_export import render_run_pdf
 from .providers import ProviderError, ProviderRegistry, load_local_env
@@ -45,9 +46,22 @@ def unique_experiment_title(title, existing_titles):
         n += 1
 
 
+def light_config(config):
+    """A run's configuration for lists: a designed run keeps its design name and roles, not every text and file."""
+    if config.get("scenario") != DESIGNED:
+        return config
+    light = {k: v for k, v in config.items() if k not in ("design", "design_agents", "workspace_files")}
+    design = config.get("design") or {}
+    light["design"] = {"id": design.get("id", ""), "name": design.get("name", "")}
+    light["design_agents"] = {a: {k: row.get(k) for k in ("role", "role_name", "handle", "forbidden_files", "start_after")}
+                              for a, row in (config.get("design_agents") or {}).items()}
+    return light
+
+
 class LabManager:
-    def __init__(self, data_dir, work_dir):
+    def __init__(self, data_dir, work_dir, designs_dir=DESIGNS_DIR):
         self.data_dir, self.work_dir = Path(data_dir), Path(work_dir)
+        self.designs = DesignStore(designs_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.work_dir.chmod(0o700)
         self.registry = ProviderRegistry(self.work_dir / "models.json")
@@ -93,7 +107,7 @@ class LabManager:
     def summary(self, state):
         metrics = state.get("metrics", {})
         usage = state.get("usage", {}).values()
-        return {"id": state["id"], "title": state["config"]["title"], "config": state["config"],
+        return {"id": state["id"], "title": state["config"]["title"], "config": light_config(state["config"]),
                 "status": state["status"], "created_at": state["created_at"], "metrics": metrics,
                 "finish_reason": state.get("finish_reason"),
                 "usage": {key: sum(row.get(key) or 0 for row in usage)
@@ -110,7 +124,29 @@ class LabManager:
                     "common_prompt": DEFAULT_COMMON_PROMPT, "solo_common_prompt": DEFAULT_SOLO_COMMON_PROMPT,
                     "communication_prompt": DEFAULT_COMMUNICATION_PROMPT, "arc_prompt": ARC_PROMPT, "tools": copy.deepcopy(TOOLS + [t for t in ARC_TOOLS if t["function"]["name"] not in {x["function"]["name"] for x in TOOLS}] + [ACCOUNT_TOOL, PLACE_ORDER_TOOL]),
                     "runs": [self.summary(s) for s in sorted(states, key=lambda s: s["created_at"], reverse=True)],
-                    "series": self.series_list()}
+                    "series": self.series_list(),
+                    "designs": self.designs.list(), "design_templates": self.designs.templates(),
+                    "builtin_tools": copy.deepcopy(ALTRUISM_TOOLS)}
+
+    def design_list(self):
+        return {"designs": self.designs.list(), "templates": self.designs.templates()}
+
+    def get_design(self, design_id):
+        return self.designs.get(design_id)
+
+    def save_design(self, body):
+        """Write a design to designs/. ``create`` picks a free id from the name instead of overwriting."""
+        create = body.get("create", False)
+        if not isinstance(create, bool):
+            raise ValueError("create must be true or false")
+        with self.lock:
+            design = self.designs.save(body.get("design"), create=create)
+            return {"design": design, "designs": self.designs.list()}
+
+    def delete_design(self, design_id):
+        with self.lock:
+            self.designs.delete(design_id)
+            return {"designs": self.designs.list()}
 
     def create(self, config):
         config = copy.deepcopy(config)
@@ -147,7 +183,7 @@ class LabManager:
         history = copy.deepcopy(self.archive_histories[run_id].get(agent, []))
         account = None
         intact = None
-        if state["config"].get("scenario") in ("custom", "communication", "group_misalignment", "altruism", "arc", "gpu_procurement"):
+        if state["config"].get("scenario") in ("custom", "communication", "group_misalignment", "altruism", "arc", "gpu_procurement", DESIGNED):
             files = state.get("workspace_state", state["config"].get("workspace_files", {})).get(agent, {})
             file = files
         elif is_segment(state["config"].get("scenario")):
@@ -166,8 +202,12 @@ class LabManager:
         sections, exact = assemble_prompt(state["config"], agent) if history else (None, None)
         if exact != (history[0]["content"] if history else None):
             sections = None
+        designed = state["config"].get("scenario") == DESIGNED
         return {"agent_id": agent, "system_prompt": history[0]["content"] if history else "History unavailable for this agent.",
-                "question": state["question"], "file": file, "files": files,
+                # A designed role can have its own task: the first user message of that agent.
+                "question": history[1]["content"] if designed and len(history) > 1 else state["question"],
+                **({"role": state["config"].get("design_agents", {}).get(agent)} if designed else {}),
+                "file": file, "files": files,
                 **({"sections": sections} if sections is not None else {}),
                 **({"account": account} if account is not None else {}),
                 **({"intact_file": intact} if intact is not None else {}),
@@ -186,6 +226,18 @@ class LabManager:
 
     def export_pdf(self, run_id, kind):
         return render_run_pdf(self.export(run_id), kind)
+
+    def wire_log(self, run_id):
+        self.snapshot(run_id)  # Unknown experiments are rejected before any path is built.
+        if not _RUN_ID.fullmatch(run_id):
+            raise ValueError("Unknown experiment")
+        run = self.runs.get(run_id)
+        path = run.wire_log.path if run and run.wire_log else self.work_dir / "runs" / run_id / "wire_log.md"
+        with run.wire_log.lock if run and run.wire_log else threading.Lock():
+            if not path.is_file():
+                raise ValueError("No provider requests were logged for this experiment. "
+                                 "Demo runs and runs from before the wire log have none.")
+            return path.read_bytes()
 
     def control(self, run_id, action):
         with self.lock:
@@ -254,7 +306,22 @@ class LabManager:
                   "leader", "importance", "status", "finish_reason", "breaches", "breach_rate", "before_peer_exposure",
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
-                  "disclosed_via", "order_total", "order_budget_status", "tested_models", "peer_models"]
+                  "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
+                  "tested_models", "peer_models"]
+        # One column per custom tool parameter, such as set_spending.amount, with the value of the tool's last call.
+        def last_arguments(m):
+            last = {}
+            for e in m.get("custom_actions") or ():
+                last[e["tool"]] = e.get("arguments") or {}
+            return {f"{tool}.{key}": value for tool, arguments in last.items() for key, value in arguments.items()}
+        argument_fields = list(dict.fromkeys(f for r in rows for f in last_arguments(r["metrics"])))
+        fields += argument_fields
+        # Three columns per design measure, such as budget.class, budget.over_by and budget.disclosure_term.
+        def measure_columns(m):
+            return {f"{name}.{key}": "" if result[key] is None else result[key]
+                    for name, result in (m.get("measures") or {}).items()
+                    for key in ("class", "over_by", "disclosure_term")}
+        fields += list(dict.fromkeys(f for r in rows for f in measure_columns(r["metrics"])))
         profile_names = {p["id"]: p.get("name") or p["id"] for p in data["providers"]}
         def model_names(c, tested):
             return " | ".join(sorted({profile_names.get(p, p) for a, p in (c.get("models") or {}).items()
@@ -281,7 +348,11 @@ class LabManager:
                              "disclosed_via": " ".join(sorted({v for s in agents.values() for v in s.get("disclosed_via") or ()})),
                              "order_total": (m.get("order") or {}).get("total", ""),
                              "order_budget_status": (m.get("order") or {}).get("budget_status", ""),
-                             "tested_models": model_names(c, True), "peer_models": model_names(c, False)})
+                             "design_id": (c.get("design") or {}).get("id", ""),
+                             "design_name": (c.get("design") or {}).get("name", ""),
+                             "custom_actions": " ".join(f"{e['agent_id']}:{e['tool']}" for e in m.get("custom_actions") or ()),
+                             "tested_models": model_names(c, True), "peer_models": model_names(c, False),
+                             **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 
     def _favorites_path(self):
@@ -688,6 +759,10 @@ def make_lab_server(manager, port=8766):
                         self.send(200, manager.export_csv(), "text/csv; charset=utf-8", "swarm-lab-comparisons.csv")
                     elif path == "/api/series":
                         self.send(200, {"series": manager.series_list()})
+                    elif path == "/api/designs":
+                        self.send(200, manager.design_list())
+                    elif len(parts) == 3 and parts[:2] == ["api", "designs"]:
+                        self.send(200, manager.get_design(parts[2]))
                     elif len(parts) == 4 and parts[:2] == ["api", "series"] and parts[3] == "export.csv" and _RUN_ID.fullmatch(parts[2]):
                         self.send(200, manager.export_csv(parts[2]), "text/csv; charset=utf-8", "swarm-lab-package-" + parts[2] + ".csv")
                     elif len(parts) >= 3 and parts[:2] == ["api", "runs"]:
@@ -697,13 +772,16 @@ def make_lab_server(manager, port=8766):
                             kind = "results" if parts[3] == "export.pdf" else "chats"
                             suffix = "" if kind == "results" else "-chats"
                             self.send(200, manager.export_pdf(parts[2], kind), "application/pdf", "swarm-lab-" + parts[2] + suffix + ".pdf")
+                        elif len(parts) == 4 and parts[3] == "wire_log.md":
+                            self.send(200, manager.wire_log(parts[2]), "text/markdown; charset=utf-8",
+                                      "swarm-lab-" + parts[2] + "-wire-log.md")
                         elif len(parts) == 4 and parts[3] == "export":
                             self.send(200, manager.export(parts[2]), attachment="swarm-lab-" + parts[2] + ".json")
                         elif len(parts) == 3:
                             self.send(200, manager.snapshot(parts[2]))
                         else:
                             self.send(404, {"error": "Unknown route"})
-                    elif path in ("/", "/app.js", "/style.css"):
+                    elif path in ("/", "/app.js", "/lab.js", "/style.css"):
                         file = static / ("index.html" if path == "/" else path[1:])
                         self.send(200, file.read_bytes(), (mimetypes.guess_type(file.name)[0] or "text/plain") + "; charset=utf-8")
                     elif path == "/favicon.ico":
@@ -723,7 +801,10 @@ def make_lab_server(manager, port=8766):
                     self.send(200, {"providers": manager.registry.save(body)})
                 elif path == "/api/preview":
                     run = LabRun(body, manager.data_dir, manager.work_dir / "preview", manager.registry, preview=True)
-                    self.send(200, {"question": run.question, "agents": {a: {"prompt": run.prompt(a), "sections": run.prompt_sections(a),
+                    self.send(200, {"question": run.question, "config": light_config(run.config),
+                              "agents": {a: {"prompt": run.prompt(a), "sections": run.prompt_sections(a),
+                              "task": run.questions.get(a, run.question),
+                              **({"role": run.config["design_agents"][a]} if run.config["scenario"] == DESIGNED else {}),
                               "file": run.files[a], "files": run.workspaces[a], "tools": run.tools_for(a),
                               "defaults": agent_text_defaults(run.config, a),
                               **({"account": run.accounts[a]} if run.accounts else {}),
@@ -732,6 +813,10 @@ def make_lab_server(manager, port=8766):
                               for a in run.agents}})
                 elif path == "/api/runs":
                     self.send(201, manager.create(body))
+                elif path == "/api/designs":
+                    self.send(200, manager.save_design(body))
+                elif len(parts) == 4 and parts[:2] == ["api", "designs"] and parts[3] == "delete":
+                    self.send(200, manager.delete_design(parts[2]))
                 elif path == "/api/runs/delete":
                     self.send(200, manager.delete_runs(body.get("ids")))
                 elif path == "/api/series":
