@@ -150,8 +150,8 @@ class ProviderRegistry:
             raise ValueError("Unknown provider format")
         if profile["reasoning_effort"] not in ("", "none", "low", "medium", "high", "xhigh", "max"):
             raise ValueError("Invalid reasoning setting")
-        if profile["kind"] == "anthropic" and profile["reasoning_effort"]:
-            raise ValueError("This reasoning setting uses the OpenAI-compatible format")
+        if profile["kind"] == "anthropic" and profile["reasoning_effort"] == "none":
+            raise ValueError("Anthropic Messages has no Off setting here. Choose Low for the least thinking")
         if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
             raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
@@ -465,7 +465,15 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                    "system": "\n\n".join(m["content"] for m in provider_messages if m["role"] == "system"),
                    "messages": anthropic_messages(provider_messages),
                    "tools": [{"name": t["function"]["name"], "description": t["function"]["description"],
-                              "input_schema": t["function"]["parameters"]} for t in tools]}
+                              "input_schema": t["function"]["parameters"]} for t in tools],
+                   # Each call resends the whole history, so cache the prefix up to the last block.
+                   "cache_control": {"type": "ephemeral"}}
+        # Without an effort the model keeps its own default (Opus 5.5: medium, Sonnet 5.5: high)
+        # and returns empty thinking blocks. With one, ask for adaptive thinking and a readable
+        # summary. Older models such as Haiku 4.5 reject adaptive thinking, so leave effort empty there.
+        if profile.get("reasoning_effort"):
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+            payload["output_config"] = {"effort": profile["reasoning_effort"]}
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
     elif profile["kind"] == "openai_responses":
         endpoint = profile["base_url"] + "/responses"
@@ -549,6 +557,14 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                           "output_tokens": usage.get("output_tokens", usage.get("completion_tokens"))}
         reported_usage = {k: v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
                           for k, v in reported_usage.items()}
+        # Anthropic counts cached input apart from input_tokens. Keep input_tokens as the
+        # whole prompt, comparable with other providers, and report the cached part on its own.
+        if profile["kind"] == "anthropic" and reported_usage["input_tokens"] is not None:
+            for field in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    reported_usage[field] = value
+                    reported_usage["input_tokens"] += value
         details = usage.get("output_tokens_details", usage.get("completion_tokens_details"))
         reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) and reasoning_tokens >= 0:

@@ -719,6 +719,8 @@ class LabRun:
         self.channel = None  # Wording of that channel: name, new-message notice, and continuation prompt.
         self.questions = {}  # Designed runs: the first user message per agent, when roles have their own task.
         self.custom_tools = {}  # Designed runs: custom action tools by name.
+        self.world_start = None  # Designed runs with a world clock: the in-world time of the first channel message.
+        self.board_history = []  # Designed runs: channel messages from before the run, shown first by read_board.
         if self.config["scenario"] == DESIGNED:
             design, rows = self.config["design"], self.config["design_agents"]
             self.questions = {a: rows[a]["task"] for a in self.agents}
@@ -727,6 +729,10 @@ class LabRun:
             self.workspaces = {a: copy.deepcopy(self.config["workspace_files"].get(a, {})) for a in self.agents}
             self.files = self.workspaces
             self.custom_tools = {spec["name"]: spec for spec in design["custom_tools"]}
+            # Runs created before the world clock have neither key.
+            if design["world"].get("start_time"):
+                self.world_start = datetime.strptime(design["world"]["start_time"], experiment_design.WORLD_TIME)
+            self.board_history = design["world"].get("board_history") or []
             if design["world"]["use_handles"]:
                 channel = design["world"]["channel"] or experiment_design.DEFAULT_CHANNEL
                 self.handles = {a: rows[a]["handle"] for a in self.agents}
@@ -826,6 +832,14 @@ class LabRun:
     @staticmethod
     def now():
         return datetime.now(timezone.utc).isoformat()
+
+    def board_time(self, at):
+        """Time of a channel message as agents see it. With a world clock, the first message of the run is at
+        world.start_time and later ones follow by the real time elapsed since; without one, the time of day."""
+        if self.world_start is None:
+            return at[11:16]
+        elapsed = datetime.fromisoformat(at) - datetime.fromisoformat(self.state["notes"][0]["at"])
+        return (self.world_start + elapsed).strftime("%Y-%m-%d %H:%M")
 
     def partition(self, spec):
         digest = hashlib.sha256(f"{self.config['task_id']}:{self.config['seed']}:{len(self.agents)}".encode()).hexdigest()
@@ -1109,9 +1123,13 @@ class LabRun:
                 result = {"notes": copy.deepcopy(self.state["notes"])}
                 retrieved = [n["id"] for n in result["notes"] if n["agent_id"] != agent]
                 if self.handles:
-                    # A chat channel: sender handle and time of day, no agent ids or origin markers.
-                    result = {"messages": [{"id": n["id"], "from": self.handles.get(n["agent_id"], n["agent_id"]),
-                                            "time": n["at"][11:16], "content": n["content"]} for n in result["notes"]]}
+                    # A chat channel: sender handle and time of day, no agent ids or origin markers. The channel
+                    # history has no ids: it is not part of the run's notes.
+                    history = [{"from": h["from"], "time": h["at"].replace("T", " "), "content": h["content"]}
+                               for h in self.board_history]
+                    result = {"messages": history + [{"id": n["id"], "from": self.handles.get(n["agent_id"], n["agent_id"]),
+                                                      "time": self.board_time(n["at"]), "content": n["content"]}
+                                                     for n in result["notes"]]}
                 if self.config["mode"] == "demo":
                     self.state["exposures"][agent] = retrieved  # Script receives this return value immediately.
                 self.event("board_read", agent, note_ids=retrieved, **origin)
@@ -1355,7 +1373,8 @@ class LabRun:
         if usage is None or any(usage.get(k) is None for k in ("input_tokens", "output_tokens")):
             totals["usage_unavailable_calls"] += 1
         if usage is not None:
-            for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cost_usd"):
+            for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cost_usd",
+                        "cache_read_input_tokens", "cache_creation_input_tokens"):
                 if usage.get(key) is not None:
                     totals[key] = totals.get(key, 0) + usage[key]
 
@@ -1754,6 +1773,9 @@ class LabRun:
                                                                  "ends_run", "exposed_note_ids")}
                                     for e in self.state["events"] if e.get("kind") == "custom_action"]
                                    if self.config["scenario"] == DESIGNED else None),
+                "measures": (experiment_design.measure_results(
+                                 self.config["design"], [e for e in self.state["events"] if e.get("kind") == "custom_action"])
+                             if self.config["scenario"] == DESIGNED else None),
                 "agents": {a: {"read": first[a] is not None, "restricted": a in restricted,
                                "breached": a in breaches, "first_read": first[a], "answer": latest[a],
                                "disclosed": a in disclosures,

@@ -152,7 +152,7 @@ const HELP = {
   "provider-url": {label: "Base URL", text: "The root the lab extends. Do not add /chat/completions or /messages yourself, and do not put the key in the URL. HTTPS is required, except for http://127.0.0.1 or localhost.\n\nFor Gemini, use https://generativelanguage.googleapis.com/v1beta/openai — the lab then calls /chat/completions there.\n\nA typical Chat Completions root ends in /v1. Responses gets /responses added. Anthropic usually ends in /v1 and gets /messages."},
   "provider-model": {label: "Exact model ID", text: "The id the provider expects, copied exactly. A known model fills this in. If the list has no id for that endpoint, type it here. For Gemini that is a current id such as gemini-3.8-flash. The model has to accept tool calls in the format you selected."},
   "provider-token": {label: "Output budget parameter", text: "Name of the field that caps one reply. Many Chat Completions servers, including Gemini’s, want max_tokens. Some newer OpenAI models want max_completion_tokens. Responses always uses max_output_tokens, so this menu is locked there."},
-  "provider-reasoning": {label: "Reasoning", text: "How much thinking to request. Empty leaves the model’s default and still asks Gemini for a thought summary.\n\nOn Chat Completions the lab sends reasoning_effort, except for Gemini. Gemini receives thinking_level instead, with thought summaries turned on. Off sends reasoning_effort none and does not ask for the summary. Gemini 3 and Gemini 2.5 Pro always think, so Off is not available for them; Low asks for the least thinking. Very high and Maximum stay as those values on other servers; Gemini has no higher step, so both become high.\n\nOpenRouter receives reasoning.effort and is asked to include the reasoning text. OpenAI Responses is asked for a reasoning summary unless reasoning is Off. Gemini and OpenAI texts are summaries, not the raw chain of thought.\n\nWhatever readable text comes back is shown on the agent’s Thinking tab and kept in the JSON log and both PDFs. Anthropic does not use this control, so thinking stays off there."},
+  "provider-reasoning": {label: "Reasoning", text: "How much thinking to request. Empty leaves the model’s default and still asks Gemini for a thought summary.\n\nOn Chat Completions the lab sends reasoning_effort, except for Gemini. Gemini receives thinking_level instead, with thought summaries turned on. Off sends reasoning_effort none and does not ask for the summary. Gemini 3 and Gemini 2.5 Pro always think, so Off is not available for them; Low asks for the least thinking. Very high and Maximum stay as those values on other servers; Gemini has no higher step, so both become high.\n\nOpenRouter receives reasoning.effort and is asked to include the reasoning text. OpenAI Responses is asked for a reasoning summary unless reasoning is Off. Gemini and OpenAI texts are summaries, not the raw chain of thought.\n\nAnthropic Messages receives output_config.effort with adaptive thinking and a summarized display. Off is not available there; Low asks for the least thinking. Empty leaves the model’s default: Claude Opus 5.5 and Sonnet 5.5 still think (Opus at medium, Sonnet at high) but return empty thinking text. Models before Claude 4.6, such as Haiku 4.5, reject adaptive thinking, so leave this empty for them.\n\nWhatever readable text comes back is shown on the agent’s Thinking tab and kept in the JSON log and both PDFs."},
   "provider-key-env": {label: "Key environment variable", text: "Name of an environment variable on the machine running the lab, for example GEMINI_API_KEY. Only the name is saved. Put the value in the environment, or in a gitignored .env file in the project folder. The lab reads it at startup and does not write it into profiles or exports."},
   "provider-key": {label: "API key", text: "Optional key kept only on this machine, in a local file that Git ignores. It is not written into the model profile, not shown again, and not included in exports. Leave the field empty to keep the saved key. If a gitignored .env file or the named environment variable already holds the key, leave this empty too. Saving a profile does not call the model."},
   "provider-clear": {label: "Remove saved key", text: "Deletes the local key for this profile. An environment variable, if you set one, still applies."},
@@ -506,6 +506,7 @@ function renderRun() {
     const boxes=designed?[
       box(m.breach_count?"bad":"good","Breaches",m.restricted_count?`${m.breach_count}/${m.restricted_count}`:"—",m.restricted_count?"agents with a breach rule who broke it: a forbidden file read or a breach tool called":"No role has a breach rule"),
       box(actions.some(a=>a.restricted)?"bad":"neutral","Action tools",String(actions.length),actions.length?esc(actions.map(a=>`${who(a.agent_id)}: ${a.tool}(${Object.entries(a.arguments||{}).map(([k,v])=>`${k}=${v}`).join(", ")})`).join(" · ")):"No custom tool was called"),
+      ...Object.entries(m.measures||{}).map(([name,r])=>box(r.class==="within"?"good":r.class==="no_call"?"neutral":"bad",`Measure ${esc(name)}`,{within:"Within",over_disclosed:"Over, disclosed",over_silent:"Over, silent",over:"Over",no_call:"—"}[r.class]||esc(r.class),r.class==="no_call"?"The measured tool was never called":esc(`${r.value} against the limit of ${r.limit}`+(r.over_by?`, ${r.over_by} over`:"")+(r.class==="over_disclosed"?`; the text names it (“${r.disclosure_term}”)`:r.class==="over_silent"?"; the text contains none of the disclosure terms":"")))),
       box(m.after_peer_exposure?"bad":"good","After peer notes",String(m.after_peer_exposure||0),"breaches with peer notes in the request"),
       ...(c.answer_policy!=="none"?[box(answerTone,"Collective answer",m.team_answer===null?"—":esc(m.team_answer),m.team_answer===null?"No collective answer":"Not scored")]:[]),
     ]:procurement?[
@@ -701,20 +702,20 @@ function matchingPreset(profile){
 }
 function syncProviderKind(){
   const kind=$("provider-kind").value;
-  $("provider-reasoning").disabled=kind==="anthropic";
   const responses=kind==="openai_responses";
   $("provider-token-param").disabled=responses;
   if(responses)$("provider-token-param").value="max_output_tokens";
   else if($("provider-token-param").value==="max_output_tokens")$("provider-token-param").value="max_tokens";
-  if($("provider-reasoning").disabled)$("provider-reasoning").value="";
   syncReasoningOptions();
 }
 function syncReasoningOptions(){
   // Google: Gemini 2.5 Pro and Gemini 3 models always think. Off would not switch anything off.
   const alwaysOn=/^(models\/|google\/)?gemini-(3|2\.5-pro)/.test($("provider-model").value.trim());
+  const anthropic=$("provider-kind").value==="anthropic";
   const off=$("provider-reasoning").querySelector('option[value="none"]');
-  off.disabled=alwaysOn;
-  off.textContent=alwaysOn?"Off · not available, this model always thinks":"Off · instruct mode";
+  off.disabled=alwaysOn||anthropic;
+  off.textContent=anthropic?"Off · not available on Anthropic Messages":alwaysOn?"Off · not available, this model always thinks":"Off · instruct mode";
+  if(off.disabled&&$("provider-reasoning").value==="none")$("provider-reasoning").value="";
 }
 function closeModelPicker(){
   $("provider-search-list").hidden=true;
@@ -1156,7 +1157,7 @@ async function init(){
   $("provider-search-list").addEventListener("mousedown",e=>{const option=e.target.closest("[data-preset]");if(!option)return;e.preventDefault();applyPreset(MODEL_PRESETS[Number(option.dataset.preset)]);});
   document.addEventListener("pointerdown",e=>{if(!$("provider-picker").contains(e.target))closeModelPicker();});
   $("new-provider").addEventListener("click",()=>editProvider());$("provider-list").addEventListener("click",e=>{const el=e.target.closest("[data-provider]");if(el)editProvider(bootstrap.providers.find(p=>p.id===el.dataset.provider));});
-  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-kind").value!=="anthropic"?$("provider-reasoning").value:"",api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
+  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-reasoning").value,api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
   $("compare-filter").addEventListener("change",()=>{hideDeleteConfirm();renderComparisons();});
   $("compare-all").addEventListener("change",()=>{const visible=visibleCompareRuns().map(r=>r.id);if($("compare-all").checked)visible.forEach(id=>compareSelected.add(id));else visible.forEach(id=>compareSelected.delete(id));renderComparisons();});
   $("compare-favorite").addEventListener("click",()=>markFavorites(true));

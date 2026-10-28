@@ -10,3 +10,7 @@ dist/
 restart-swarm-lab.bat
 .provider-secrets.json
 .provider-secrets.json.tmp
+
+# Private notes and analysis
+MODELL_TESTPLAN.md
+analysis/

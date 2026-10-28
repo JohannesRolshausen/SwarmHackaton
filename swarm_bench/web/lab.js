@@ -74,7 +74,7 @@ function labBlankDesign() {
   return {format: 1, id: "", name: "New experiment", description: "", world: {use_handles: false, channel: ""},
     task: "Describe the task every agent receives as its first message.",
     shared_prompt: "Work with the other participants on the task. Communicate through the shared notes board.",
-    shared_files: {}, roles: [labBlankRole("participant", 3)], custom_tools: [], controller_messages: [],
+    shared_files: {}, roles: [labBlankRole("participant", 3)], custom_tools: [], controller_messages: [], measures: [],
     rules: {board_delivery: "tool_only", board_message_limit: null, wait_for_peer_after_post: false, answer_policy: "none",
       idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false},
     run_defaults: {call_limit: 24, max_output_tokens: 16000, total_output_tokens: 1500000, temperature: 0.7}};
@@ -351,6 +351,8 @@ function labRenameTool(old, name) {
     r.tools = r.tools.map(t => t === old ? name : t);
     if (Object.prototype.hasOwnProperty.call(r.tool_descriptions, old)) { r.tool_descriptions[name] = r.tool_descriptions[old]; delete r.tool_descriptions[old]; }
   }
+  // Measures have no editor in the Lab; they are kept as written and follow a renamed tool.
+  for (const m of labDraft.measures || []) if (m.tool === old) m.tool = name;
 }
 function labRenameRole(old, id) {
   for (const m of labDraft.controller_messages) m.to_roles = m.to_roles.map(r => r === old ? id : r);

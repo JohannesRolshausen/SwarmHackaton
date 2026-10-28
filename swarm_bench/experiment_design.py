@@ -3,11 +3,13 @@
 A design is plain data. ``validate_design`` checks it and fills in defaults; ``expand`` turns its roles into one
 entry per agent, in role order (agent_01 is the first instance of the first role). The lab engine runs a design as
 ``scenario: designed`` with the whole design frozen in the run configuration, so a run stays reproducible after the
-design is edited or deleted. Designs are shared through the tracked ``designs/`` folder; they never hold model
-profiles or keys."""
+design is edited or deleted. ``measure_results`` classifies a run's custom tool calls against the design's measures.
+Designs are shared through the tracked ``designs/`` folder; they never hold model profiles or keys."""
 import copy
 import json
+import math
 import re
+from datetime import datetime
 from pathlib import Path
 
 from .common import ROOT, read_json
@@ -31,6 +33,7 @@ DEFAULT_TOOLS = ["list_files", "read_file", "read_board", "post_note", "submit_a
 PARAM_TYPES = ("string", "integer", "number", "boolean")
 PLACEHOLDER = re.compile(r"\{(handle|role|agent_id|n|others|group_size|channel|leader)\}")
 DEFAULT_CHANNEL = "shared channel"
+WORLD_TIME = "%Y-%m-%dT%H:%M"  # World clock and channel history: local time to the minute, no time zone.
 RULE_DEFAULTS = {"board_delivery": "tool_only", "board_message_limit": None, "wait_for_peer_after_post": False,
                  "answer_policy": "none", "idle_policy": "finish", "idle_wait_seconds": 2, "stop_on_breach": False}
 RUN_DEFAULTS = {"call_limit": 24, "max_output_tokens": 16000, "total_output_tokens": 1500000, "temperature": None}
@@ -99,6 +102,34 @@ def _files(value, label):
     return out
 
 
+def _world_time(value, label):
+    try:
+        datetime.strptime(value, WORLD_TIME)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a time such as 2026-10-12T09:30") from None
+    return value
+
+
+def _board_history(value, start_time, use_handles):
+    """Channel messages from before the run, oldest first; every agent sees them with read_board."""
+    value = [] if value is None else value
+    if not isinstance(value, list) or len(value) > 50:
+        raise ValueError("world.board_history: a list of at most 50 messages")
+    if value and not (use_handles and start_time):
+        raise ValueError("world.board_history needs handles on and a world.start_time")
+    history = []
+    for i, item in enumerate(value, 1):
+        label = f"Channel history message {i}"
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}: invalid definition")
+        at = _world_time(item.get("at"), f"{label}: at")
+        if at >= start_time or (history and at < history[-1]["at"]):
+            raise ValueError(f"{label}: messages must be in time order and before world.start_time")
+        content = _text(item.get("content"), f"{label}: content", 6000, True).strip()
+        history.append({"from": _text(item.get("from"), f"{label}: from", 60, True).strip(), "at": at, "content": content})
+    return history
+
+
 def _tool_texts(value, label, known):
     value = {} if value is None else value
     if not isinstance(value, dict):
@@ -141,6 +172,75 @@ def _custom_tool(raw, index):
             "response": _text(raw.get("response") or "Done.", f"{label}: response", 4000).strip() or "Done.",
             "breach": _flag(raw.get("breach"), f"{label}: counts as breach"),
             "ends_run": _flag(raw.get("ends_run"), f"{label}: ends the run")}
+
+
+def _measure(raw, index, tools):
+    if not isinstance(raw, dict):
+        raise ValueError(f"Measure {index}: invalid definition")
+    name = raw.get("name")
+    if not isinstance(name, str) or not PARAM_NAME.fullmatch(name):
+        raise ValueError(f"Measure {index}: name must start with a letter and use a-z, 0-9 and _")
+    if name in tools:
+        raise ValueError(f"Measure {name}: name belongs to a custom tool")
+    label = f"Measure {name}"
+    tool = tools.get(raw.get("tool"))
+    if tool is None:
+        raise ValueError(f"{label}: tool must be one of the design's custom tools")
+    types = {p["name"]: p["type"] for p in tool["parameters"]}
+    parameter = raw.get("parameter")
+    if types.get(parameter) not in ("integer", "number"):
+        raise ValueError(f"{label}: parameter must be an integer or number parameter of {tool['name']}")
+    limit = raw.get("limit")
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit):
+        raise ValueError(f"{label}: limit must be a number")
+    disclosure = raw.get("disclosure_parameter") or None
+    if disclosure is not None and types.get(disclosure) != "string":
+        raise ValueError(f"{label}: disclosure parameter must be a text parameter of {tool['name']}")
+    terms = raw.get("disclosure_terms") or []
+    if (not isinstance(terms, list) or len(terms) > 50
+            or any(not isinstance(t, str) or not t.strip() or len(t) > 100 for t in terms)):
+        raise ValueError(f"{label}: disclosure terms must be a list of at most 50 texts of up to 100 characters")
+    if bool(disclosure) != bool(terms):
+        raise ValueError(f"{label}: a disclosure parameter needs disclosure terms, and terms need a disclosure parameter")
+    return {"name": name, "tool": tool["name"], "parameter": parameter, "limit": limit,
+            "disclosure_parameter": disclosure, "disclosure_terms": [t.strip() for t in terms]}
+
+
+def _fold(text):
+    """Lower case, with each run of whitespace (no-break spaces too) as one space."""
+    return " ".join(str(text or "").casefold().split())
+
+
+def measure_results(design, actions):
+    """Each measure's class from the last call of its tool, as in the CSV's ``<tool>.<parameter>`` columns.
+
+    ``within``: the value is at or below the limit. Above it, ``over_disclosed`` when the disclosure parameter of
+    that call contains one of the terms (case and spacing ignored), ``over_silent`` when it does not, and ``over``
+    when the measure checks no disclosure. ``no_call`` when the tool was never called."""
+    last = {}
+    for action in actions:
+        last[action["tool"]] = action.get("arguments") or {}
+    results = {}
+    for m in design.get("measures") or ():
+        arguments = last.get(m["tool"])
+        value = None if arguments is None else arguments.get(m["parameter"])
+        if value is None:
+            results[m["name"]] = {"class": "no_call", "value": None, "limit": m["limit"], "over_by": None,
+                                  "disclosure_term": None}
+            continue
+        over_by = value - m["limit"]
+        term = None
+        if over_by <= 0:
+            kind = "within"
+        elif m["disclosure_parameter"] is None:
+            kind = "over"
+        else:
+            text = _fold(arguments.get(m["disclosure_parameter"]))
+            term = next((t for t in m["disclosure_terms"] if _fold(t) in text), None)
+            kind = "over_disclosed" if term else "over_silent"
+        results[m["name"]] = {"class": kind, "value": value, "limit": m["limit"], "over_by": max(over_by, 0),
+                              "disclosure_term": term}
+    return results
 
 
 def _role(raw, index, known_tools):
@@ -212,6 +312,8 @@ def validate_design(raw):
         raise ValueError("world must be an object")
     use_handles = _flag(world.get("use_handles"), "world.use_handles")
     channel = _text(world.get("channel"), "Channel name", 100).strip()
+    start_time = _world_time(world["start_time"], "world.start_time") if world.get("start_time") else None
+    board_history = _board_history(world.get("board_history"), start_time, use_handles)
     custom = raw.get("custom_tools") or []
     if not isinstance(custom, list) or len(custom) > 12:
         raise ValueError("At most 12 custom tools")
@@ -283,14 +385,21 @@ def validate_design(raw):
                          "to_roles": list(targets),
                          "content": _text(item.get("content"), f"Controller message {i}", 6000, True).strip(),
                          "stop_others": _flag(item.get("stop_others"), f"Controller message {i}: stop the other roles")})
+    measures_raw = raw.get("measures") or []
+    if not isinstance(measures_raw, list) or len(measures_raw) > 12:
+        raise ValueError("At most 12 measures")
+    measures = [_measure(item, i, {t["name"]: t for t in custom_tools}) for i, item in enumerate(measures_raw, 1)]
+    if len({m["name"] for m in measures}) != len(measures):
+        raise ValueError("Two measures have the same name")
     design = {"format": FORMAT, "id": design_id,
               "name": _text(raw.get("name"), "Design name", 150, True).strip(),
               "description": _text(raw.get("description"), "Description", 8000).strip(),
-              "world": {"use_handles": use_handles, "channel": channel},
+              "world": {"use_handles": use_handles, "channel": channel, "start_time": start_time,
+                        "board_history": board_history},
               "task": _text(raw.get("task"), "Shared task", 20000, True).strip(),
               "shared_prompt": _text(raw.get("shared_prompt"), "Shared prompt", 16000).strip(),
               "shared_files": _files(raw.get("shared_files"), "Shared files"),
-              "roles": roles, "custom_tools": custom_tools, "controller_messages": messages,
+              "roles": roles, "custom_tools": custom_tools, "controller_messages": messages, "measures": measures,
               "rules": rules, "run_defaults": run_defaults}
     expand(design)  # Per-agent checks: handles, forbidden files, and file counts.
     return design

@@ -528,6 +528,47 @@ class ProviderTests(unittest.TestCase):
             registry.save({**gemini, "id": "h", "model": "gemini-3.8-flash", "reasoning_effort": "low"})
             self.assertEqual([p["id"] for p in registry.public()], ["g", "h"])
 
+    def test_anthropic_effort_is_saved_but_off_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry = ProviderRegistry(Path(temp) / "models.json")
+            claude = {"id": "c", "name": "C", "kind": "anthropic", "base_url": "https://api.anthropic.com/v1",
+                      "model": "claude-opus-5-5", "reasoning_effort": "none"}
+            with self.assertRaisesRegex(ValueError, "no Off setting"):
+                registry.save(claude)
+            registry.save({**claude, "reasoning_effort": "high"})
+            self.assertEqual(registry.public()[0]["reasoning_effort"], "high")
+
+    def test_anthropic_effort_thinking_summary_and_cache_usage(self):
+        captured = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self):
+                captured.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                response = {"content": [{"type": "thinking", "thinking": "Budget is 100k.", "signature": "s"},
+                                        {"type": "text", "text": "Hello"}],
+                            "usage": {"input_tokens": 10, "output_tokens": 2,
+                                      "cache_read_input_tokens": 300, "cache_creation_input_tokens": 50}}
+                data = json.dumps(response).encode(); self.send_response(200); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}/v1"
+            msg, usage = completion({"kind": "anthropic", "base_url": base, "model": "claude-opus-5-5", "reasoning_effort": "high"},
+                                    "", [{"role": "user", "content": "task"}], [], 100)
+            self.assertEqual(captured[0]["thinking"], {"type": "adaptive", "display": "summarized"})
+            self.assertEqual(captured[0]["output_config"], {"effort": "high"})
+            self.assertEqual(captured[0]["cache_control"], {"type": "ephemeral"})
+            self.assertEqual(msg["reasoning_text"], "Budget is 100k.")
+            self.assertEqual(usage["input_tokens"], 360)
+            self.assertEqual(usage["cache_read_input_tokens"], 300)
+            self.assertEqual(usage["cache_creation_input_tokens"], 50)
+            completion({"kind": "anthropic", "base_url": base, "model": "claude-haiku-4-5", "reasoning_effort": ""},
+                       "", [{"role": "user", "content": "task"}], [], 100)
+            self.assertNotIn("thinking", captured[1])
+            self.assertNotIn("output_config", captured[1])
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
     def test_anthropic_tool_result_grouping(self):
         messages = [{"role": "system", "content": "policy"}, {"role": "user", "content": "task"},
                     {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "function": {"name": "list_files", "arguments": "{}"}}, {"id": "b", "function": {"name": "read_file", "arguments": '{"path":"notes.json"}'}}]},

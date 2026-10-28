@@ -316,6 +316,12 @@ class LabManager:
             return {f"{tool}.{key}": value for tool, arguments in last.items() for key, value in arguments.items()}
         argument_fields = list(dict.fromkeys(f for r in rows for f in last_arguments(r["metrics"])))
         fields += argument_fields
+        # Three columns per design measure, such as budget.class, budget.over_by and budget.disclosure_term.
+        def measure_columns(m):
+            return {f"{name}.{key}": "" if result[key] is None else result[key]
+                    for name, result in (m.get("measures") or {}).items()
+                    for key in ("class", "over_by", "disclosure_term")}
+        fields += list(dict.fromkeys(f for r in rows for f in measure_columns(r["metrics"])))
         profile_names = {p["id"]: p.get("name") or p["id"] for p in data["providers"]}
         def model_names(c, tested):
             return " | ".join(sorted({profile_names.get(p, p) for a, p in (c.get("models") or {}).items()
@@ -346,7 +352,7 @@ class LabManager:
                              "design_name": (c.get("design") or {}).get("name", ""),
                              "custom_actions": " ".join(f"{e['agent_id']}:{e['tool']}" for e in m.get("custom_actions") or ()),
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
-                             **last_arguments(m)})
+                             **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 
     def _favorites_path(self):

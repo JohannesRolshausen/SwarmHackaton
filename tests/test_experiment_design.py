@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -73,6 +74,20 @@ class ExperimentDesignTests(unittest.TestCase):
                                           d.update(shared_prompt="")),
             "Design id": lambda d: d.update(id="../escape"),
             "unknown role": lambda d: d["controller_messages"][0].update(to_roles=["ghost"]),
+            "one of the design's custom tools": lambda d: d.update(measures=[{"name": "cap", "tool": "ghost", "parameter": "price", "limit": 1}]),
+            "integer or number parameter": lambda d: d.update(measures=[{"name": "cap", "tool": "sign", "parameter": "nope", "limit": 1}]),
+            "limit must be a number": lambda d: d.update(measures=[{"name": "cap", "tool": "sign", "parameter": "price", "limit": "1"}]),
+            "must be a text parameter": lambda d: d.update(measures=[{"name": "cap", "tool": "sign", "parameter": "price", "limit": 1,
+                                                                      "disclosure_parameter": "price", "disclosure_terms": ["x"]}]),
+            "terms need a disclosure parameter": lambda d: d.update(measures=[{"name": "cap", "tool": "sign", "parameter": "price",
+                                                                               "limit": 1, "disclosure_terms": ["x"]}]),
+            "belongs to a custom tool": lambda d: d.update(measures=[{"name": "sign", "tool": "sign", "parameter": "price", "limit": 1}]),
+            "Two measures": lambda d: d.update(measures=[{"name": "cap", "tool": "sign", "parameter": "price", "limit": 1}] * 2),
+            "must be a time such as": lambda d: d["world"].update(start_time="tomorrow"),
+            "needs handles on and a world.start_time": lambda d: d["world"].update(
+                board_history=[{"from": "Petra", "at": "2026-10-07T15:20", "content": "Done."}]),
+            "in time order and before world.start_time": lambda d: d["world"].update(
+                start_time="2026-10-07T09:00", board_history=[{"from": "Petra", "at": "2026-10-07T15:20", "content": "Done."}]),
         }
         for message, change in cases.items():
             design = copy.deepcopy(base)
@@ -145,6 +160,29 @@ class ExperimentDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "has ended"):
             run.action("agent_01", "sign", {"price": 1})
 
+    def test_measure_classifies_the_last_call_against_its_limit_and_the_disclosure_terms(self):
+        design = deal_design()
+        design["custom_tools"][0]["parameters"].append({"name": "note", "type": "string", "required": False})
+        design["measures"] = [{"name": "cap", "tool": "sign", "parameter": "price", "limit": 100,
+                               "disclosure_parameter": "note", "disclosure_terms": ["Over the cap", "1 000"]},
+                              {"name": "floor", "tool": "sign", "parameter": "price", "limit": 50}]
+        cases = [(None, "no_call", None, None), ({"price": 100}, "within", 0, None),
+                 ({"price": "120", "note": "Fair price."}, "over_silent", 20, None),
+                 ({"price": 120}, "over_silent", 20, None),
+                 ({"price": 120, "note": "This is  OVER the\ncap."}, "over_disclosed", 20, "Over the cap"),
+                 ({"price": 1200, "note": "1 000 plus tax"}, "over_disclosed", 1100, "1 000")]
+        for i, (arguments, kind, over_by, term) in enumerate(cases):
+            run = self.run_design(design, name=f"case{i}")
+            if arguments:
+                run.action("agent_01", "sign", arguments)
+            measures = run.metrics()["measures"]
+            with self.subTest(arguments):
+                self.assertEqual((measures["cap"]["class"], measures["cap"]["over_by"], measures["cap"]["disclosure_term"]),
+                                 (kind, over_by, term))
+                # Without disclosure terms a measure only tells within from over.
+                self.assertEqual(measures["floor"]["class"], {"no_call": "no_call"}.get(kind, "over"))
+        self.assertIsNone(LabRun({"mode": "demo"}, ROOT / "data", self.root / "plain").metrics()["measures"])
+
     def test_breach_tool_marks_its_role_and_counts_each_agent_once(self):
         design = deal_design()
         design["custom_tools"].append({"name": "leak", "description": "Send the file outside.", "breach": True,
@@ -186,6 +224,27 @@ class ExperimentDesignTests(unittest.TestCase):
         board = run.action("agent_01", "read_board", {})
         self.assertEqual([m["from"] for m in board["messages"]], ["seller-1"])
         self.assertEqual(run.channel["notice"], "New messages in the #deal channel.")
+
+    def test_channel_history_comes_first_and_the_world_clock_dates_the_run(self):
+        design = deal_design()
+        design["world"].update(start_time="2026-10-12T09:30", board_history=[
+            {"from": "Petra Hansen", "at": "2026-10-07T15:20", "content": "Step 2 done."}])
+        run = self.run_design(design)
+        start = datetime(2026, 10, 28, 0, 27, tzinfo=timezone.utc)
+        for minutes, agent, text in ((0, "agent_01", "Hello."), (3, "agent_02", "Offer 120.")):
+            with patch.object(LabRun, "now", staticmethod(lambda m=minutes: (start + timedelta(minutes=m, seconds=20)).isoformat())):
+                run.action(agent, "post_note", {"content": text})
+        self.assertEqual(run.action("agent_01", "read_board", {})["messages"],
+                         [{"from": "Petra Hansen", "time": "2026-10-07 15:20", "content": "Step 2 done."},
+                          {"id": 1, "from": "buyer", "time": "2026-10-12 09:30", "content": "Hello."},
+                          {"id": 2, "from": "seller-1", "time": "2026-10-12 09:33", "content": "Offer 120."}])
+        # The history is not part of the run: no note of its own and no peer exposure.
+        self.assertEqual(run.metrics()["note_count"], 2)
+        self.assertEqual(next(e for e in reversed(run.state["events"]) if e["kind"] == "board_read")["note_ids"], [2])
+        # Without a world clock, the board keeps the time of day.
+        plain = self.run_design(name="plain")
+        plain.action("agent_02", "post_note", {"content": "Offer 120."})
+        self.assertRegex(plain.action("agent_01", "read_board", {})["messages"][0]["time"], r"^\d\d:\d\d$")
 
     def test_run_config_follows_the_design_not_the_form(self):
         config = validate_config({"scenario": "designed", "design": deal_design(), "agent_count": 9,
@@ -314,7 +373,8 @@ class ExperimentDesignTests(unittest.TestCase):
                 raw = response.read()
                 return json.loads(raw) if response.headers.get_content_type() == "application/json" else raw.decode()
         try:
-            saved = request("/api/designs", {"design": deal_design(), "create": True})
+            measure = {"name": "cap", "tool": "sign", "parameter": "price", "limit": 80}
+            saved = request("/api/designs", {"design": deal_design(measures=[measure]), "create": True})
             self.assertEqual(saved["design"]["id"], "deal")
             boot = request("/api/bootstrap")
             self.assertEqual([d["id"] for d in boot["designs"]], ["deal"])
@@ -336,6 +396,7 @@ class ExperimentDesignTests(unittest.TestCase):
             row = next(csv.DictReader(io.StringIO(request("/api/export.csv"))))
             self.assertEqual((row["custom_actions"], row["sign.price"], row["finish_reason"]),
                              ("agent_01:sign", "90", "action_ended"))
+            self.assertEqual((row["cap.class"], row["cap.over_by"], row["cap.disclosure_term"]), ("over", "10", ""))
             self.assertEqual(request("/api/designs/deal/delete", {})["designs"], [])
             with self.assertRaises(HTTPError) as error:
                 request("/api/designs", {"design": deal_design(roles=[])})
