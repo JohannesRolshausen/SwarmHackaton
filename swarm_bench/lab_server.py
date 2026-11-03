@@ -46,7 +46,8 @@ def unique_experiment_title(title, existing_titles):
         n += 1
 
 
-AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd")
+AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd",
+                    "service_tiers")
 
 
 def light_config(config):
@@ -56,6 +57,7 @@ def light_config(config):
     light = {k: v for k, v in config.items() if k not in ("design", "design_agents", "workspace_files")}
     design = config.get("design") or {}
     light["design"] = {"id": design.get("id", ""), "name": design.get("name", "")}
+    light["turn_order"] = (design.get("rules") or {}).get("turn_order", "free")
     light["design_agents"] = {a: {k: row.get(k) for k in ("role", "role_name", "handle", "forbidden_files", "start_after")}
                               for a, row in (config.get("design_agents") or {}).items()}
     return light
@@ -313,7 +315,8 @@ class LabManager:
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
                   "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
-                  "tested_models", "peer_models", "leader_model"]
+                  "tested_models", "peer_models", "leader_model", "turn_order", "rounds_completed", "round_orders",
+                  "leader_notes", "leader_service_tiers"]
         # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
         split_keys = (("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
                       ("cache_read_input_tokens", "cache_read_tokens"), ("cache_creation_input_tokens", "cache_write_tokens"),
@@ -327,7 +330,20 @@ class LabManager:
                 for key, name in split_keys:
                     values = [per_agent[a][key] for a in agents if key in per_agent[a]]
                     row[f"{side}_{name}"] = (round(sum(values), 6) if key == "cost_usd" else sum(values)) if values else ""
+            # Calls per service tier as OpenAI reported it, e.g. "default:1 flex:11". Empty for other providers.
+            tiers = (per_agent.get(leader) or {}).get("service_tiers") or {}
+            row["leader_service_tiers"] = " ".join(f"{k}:{v}" for k, v in sorted(tiers.items()))
             return row
+        def round_columns(r):
+            m, c = r.get("metrics") or {}, r["config"]
+            rounds = m.get("rounds")
+            names = {a: (s.get("handle") or a) for a, s in ((c.get("design_agents") or {}).items())}
+            leader_notes = ((m.get("agents") or {}).get(c.get("leader")) or {}).get("note_count", "")
+            return {"turn_order": c.get("turn_order", "free" if c.get("design") else ""),
+                    "rounds_completed": rounds["completed"] if rounds else "",
+                    # One group per round, in speaking order after the leader: "Jonas, Miriam | Sandra, Jonas".
+                    "round_orders": " | ".join(", ".join(names.get(a, a) for a in order) for order in rounds["orders"]) if rounds else "",
+                    "leader_notes": leader_notes if c.get("leader") else ""}
         # One column per custom tool parameter, such as set_spending.amount, with the value of the tool's last call.
         def last_arguments(m):
             last = {}
@@ -374,7 +390,7 @@ class LabManager:
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
                              "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))
                              if c["leader"] else "",
-                             **token_split(r),
+                             **token_split(r), **round_columns(r),
                              **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 

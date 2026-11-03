@@ -20,6 +20,29 @@ class ProviderError(Exception):
         self.diagnostic = diagnostic or {}
 
 
+# A 429 with one of these codes is not a rate limit: no retry helps until someone adds credit or raises a limit.
+ACTION_REQUIRED_CODES = ("credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
+                         "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "billing_hard_limit_reached")
+SERVICE_TIERS = ("", "auto", "default", "flex", "priority")
+# OpenAI's Flex guide raises the SDK timeout to 15 minutes. Twice that, since a timeout cancels the response.
+FLEX_TIMEOUT_SECONDS = 1800
+
+
+def error_code(raw):
+    """error.code (or error.type) from an error body. Only a short identifier is kept, never the message."""
+    try:
+        error = json.loads(raw).get("error")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(error, dict):
+        return None
+    for field in ("code", "type"):
+        value = error.get(field)
+        if isinstance(value, str) and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+            return value
+    return None
+
+
 def response_diagnostic(data):
     """Structural evidence only: never log prompts, reasoning or credentials."""
     if not isinstance(data, dict):
@@ -138,7 +161,8 @@ class ProviderRegistry:
     def save(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("Invalid profile")
-        fields = {"id", "name", "kind", "base_url", "model", "key_env", "token_parameter", "reasoning_effort", "api_key", "clear_key"}
+        fields = {"id", "name", "kind", "base_url", "model", "key_env", "token_parameter", "reasoning_effort", "service_tier",
+                  "api_key", "clear_key"}
         if set(payload) - fields:
             raise ValueError("Unknown profile field")
         profile = {k: str(payload.get(k, "")).strip() for k in fields - {"api_key", "clear_key"}}
@@ -154,6 +178,10 @@ class ProviderRegistry:
             raise ValueError("Anthropic Messages has no Off setting here. Choose Low for the least thinking")
         if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
             raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
+        if profile["service_tier"] not in SERVICE_TIERS:
+            raise ValueError("Unknown service tier")
+        if profile["service_tier"] and profile["kind"] != "openai_responses":
+            raise ValueError("A service tier such as Flex is only sent with the OpenAI Responses format")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -485,6 +513,8 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         # Summary is the readable text OpenAI will return. Raw reasoning stays encrypted.
         if profile.get("reasoning_effort") != "none":
             payload.setdefault("reasoning", {})["summary"] = "auto"
+        if profile.get("service_tier"):
+            payload["service_tier"] = profile["service_tier"]
         headers = {"Authorization": "Bearer " + key} if key else {}
     else:
         endpoint = profile["base_url"] + "/chat/completions"
@@ -521,8 +551,9 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     # Independent agents may queue behind one local GPU inference worker.
     # A remote thinking model sends nothing until its whole answer is ready, so the
     # wait grows with the output budget: 60 s of queueing plus 50 tokens per second.
+    flex = profile["kind"] == "openai_responses" and profile.get("service_tier") == "flex"
     timeout = (600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1")
-               else min(600, 60 + output_budget // 50))
+               else FLEX_TIMEOUT_SECONDS if flex else min(600, 60 + output_budget // 50))
     handlers = [NoRedirect()] + ([wire.tap(timeout, key)] if wire is not None else [])
     try:
         with build_opener(*handlers).open(request, timeout=timeout) as response:
@@ -533,16 +564,33 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                 raise ProviderError("Provider response too large")
             data = json.loads(raw)
     except HTTPError as exc:
+        try:
+            raw_error = exc.read(4_000_001)
+        except Exception:
+            raw_error = None
         if wire is not None:
-            wire.http_error(exc)
+            wire.http_error(exc, raw_error)
+        code = error_code(raw_error)
+        diagnostic = {"http_status": exc.code, **({"provider_error_code_name": code} if code else {}),
+                      **({"service_tier": "flex"} if flex else {})}
         # Never echo the response body, URL or headers: a gateway may reflect a key.
+        if exc.code == 429 and code in ACTION_REQUIRED_CODES:
+            raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
+                                "The run cannot go on by itself. Add credit or raise the limit, then resume the run.",
+                                diagnostic={**diagnostic, "action_required": True}) from None
+        if exc.code == 429 and flex:
+            raise ProviderError("OpenAI Flex has no capacity right now (HTTP 429, not charged). "
+                                "The run waits and tries again, after two misses in a row with standard processing.",
+                                retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
-                            retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic={"http_status": exc.code}) from None
+                            retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic=diagnostic) from None
     except TimeoutError as exc:
         if wire is not None:
             wire.failed("timeout", exc)
-        raise ProviderError(f"Provider did not respond within {timeout} seconds.", retryable=True,
-                            diagnostic={"timeout_seconds": timeout}) from None
+        raise ProviderError(f"Provider did not respond within {timeout} seconds. The run waits and tries again.",
+                            retryable=True,
+                            diagnostic={"timeout_seconds": timeout, **({"service_tier": "flex", "flex_unavailable": True}
+                                                                       if flex else {})}) from None
     except (URLError, OSError, ValueError) as exc:
         if wire is not None and not isinstance(exc, ValueError):
             wire.failed("connection failed", exc)
@@ -582,6 +630,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         cost = usage.get("cost")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
             reported_usage["cost_usd"] = cost
+    # The tier that actually served the call. A Flex request can come back as default.
+    tier = data.get("service_tier") if profile["kind"] == "openai_responses" else None
+    if isinstance(tier, str) and re.fullmatch(r"[a-z_]{1,30}", tier):
+        reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "service_tier": tier}
     check_provider_error(data, reported_usage)
     try:
         if (data.get("stop_reason") == "max_tokens" or

@@ -113,19 +113,20 @@ class AuditRegressions(unittest.TestCase):
                 saved = LabManager(ROOT / "data", self.root).snapshot(run.id)
                 self.assertEqual(saved["usage"]["agent_01"], usage)
 
-    def test_network_failure_consumes_attempt_but_missing_profile_does_not(self):
+    def test_timeout_gives_the_attempt_back_and_missing_profile_uses_none(self):
+        # Waiting for a provider says nothing about the model: a timeout never uses up the call limit.
         run = self.create(n=1, call_limit=1)
         with patch("swarm_bench.providers.build_opener") as factory:
             factory.return_value.open.side_effect = TimeoutError()
-            with self.assertRaises(ProviderError):
-                run.live_call("agent_01")
-            with self.assertRaisesRegex(ValueError, "Call limit"):
-                run.live_call("agent_01")
-            self.assertEqual(factory.return_value.open.call_count, 1)
+            for _ in range(2):
+                with self.assertRaises(ProviderError):
+                    run.live_call("agent_01")
+            self.assertEqual(factory.return_value.open.call_count, 2)
         usage = run.state["usage"]["agent_01"]
-        self.assertEqual(usage["calls"], 1)
-        self.assertEqual(usage["failed_calls"], 1)
-        self.assertEqual(usage["usage_unavailable_calls"], 1)
+        self.assertEqual(usage["calls"], 0)
+        self.assertEqual(usage["failed_calls"], 2)
+        self.assertEqual(usage["usage_unavailable_calls"], 2)
+        self.assertEqual(run.state["token_budget"]["accounted"], 0)
         missing = self.create(n=1, models={"agent_01": "missing"})
         with patch("swarm_bench.lab_engine.completion") as model:
             with self.assertRaises(ProviderError):
