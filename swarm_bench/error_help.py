@@ -18,8 +18,10 @@ PROVIDER_HOSTS = (
     ("dashscope", "Alibaba Cloud"), ("xiaomimimo.com", "Xiaomi MiMo"),
 )
 
-HTTP_NAMES = {408: "request timeout", 500: "internal server error", 502: "bad gateway",
-              503: "service unavailable or overloaded", 504: "gateway timeout", 529: "overloaded"}
+HTTP_NAMES = {408: "request timeout", 500: "internal server error", 501: "not implemented", 502: "bad gateway",
+              503: "service unavailable or overloaded", 504: "gateway timeout", 520: "unknown error behind Cloudflare",
+              521: "server down behind Cloudflare", 522: "connection timed out behind Cloudflare",
+              523: "origin unreachable behind Cloudflare", 524: "timeout behind Cloudflare", 529: "overloaded"}
 
 
 def provider_label(profile):
@@ -66,6 +68,10 @@ def explain_wait(reason, diagnostic, profile):
         return (f"No answer from {p}", f"{p} did not answer{within}.{flex}",
                 "Nothing. If every call times out, check the provider's status page or lower max_output_tokens.")
     if reason == "network":
+        if diagnostic.get("cut_off"):
+            return (f"Answer from {p} broke off",
+                    f"The connection to {p} broke while the answer was being sent.",
+                    "Nothing. If it lasts, check the connection of this machine and any proxy in between.")
         if diagnostic.get("invalid_json"):
             return (f"Unreadable answer from {p}",
                     f"{p} sent a response that is not valid JSON, often a sign of an overloaded server or a proxy "
@@ -74,6 +80,13 @@ def explain_wait(reason, diagnostic, profile):
         return (f"No connection to {p}",
                 f"The connection to {p} failed (network error, DNS or connection reset).",
                 "Check that this machine is online. The run goes on as soon as the connection is back.")
+    if reason == "server_error" and status is None:
+        return (f"Server error at {p}", f"{p} reported an error without a code.",
+                f"Nothing. If it lasts a long time, check the status page of {p}.")
+    if reason == "incomplete":
+        return (f"No usable answer from {p}",
+                f"{p} answered, but without a reply to work with (empty answer or a failed response).",
+                f"Nothing. If it lasts, check the status page of {p} or try another model.")
     if reason == "server_error":
         name = HTTP_NAMES.get(status)
         return (f"Server error at {p}",

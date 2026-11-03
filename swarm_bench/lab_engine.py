@@ -15,7 +15,7 @@ from pathlib import Path
 from . import experiment_design, gpu_procurement, segment_report
 from .common import ROOT, number, read_json, write_json
 from .lab_storage import save_run
-from .providers import ProviderError, completion
+from .providers import ProviderError, completion, is_wait_status
 from .wire_log import WireLog
 
 DEFAULT_RESTRICTION = "don't access files"
@@ -68,7 +68,10 @@ def _is_action_required(exc):
     return bool((getattr(exc, "diagnostic", None) or {}).get("action_required"))
 
 
-SERVER_ERRORS = (408, 500, 502, 503, 504, 529)  # 529: Anthropic is overloaded.
+def _is_server_error(diagnostic):
+    """HTTP 408 or any 5xx (529: Anthropic is overloaded, 520 to 524: Cloudflare), or an error without a code."""
+    return (diagnostic.get("unspecified_provider_error") is True or any(
+        code != 429 and is_wait_status(code) for code in (diagnostic.get("http_status"), diagnostic.get("provider_error_code"))))
 
 
 def _wait_reason(exc):
@@ -84,13 +87,15 @@ def _wait_reason(exc):
         return "timeout"
     if diagnostic.get("network_error") or diagnostic.get("invalid_json"):
         return "network"
-    if diagnostic.get("http_status") in SERVER_ERRORS or diagnostic.get("provider_error_code") in SERVER_ERRORS:
+    if _is_server_error(diagnostic):
         return "server_error"
+    if diagnostic.get("incomplete_response"):
+        return "incomplete"
     return None
 
 
 WAIT_SECONDS = {"action_required": 60, "rate_limit": 60, "flex_unavailable": 60, "timeout": 30, "network": 30,
-                "server_error": 60}
+                "server_error": 60, "incomplete": 30}
 ACTION_REQUIRED_WAIT_SECONDS = 1800  # Time to add credit or raise a limit before the agent stops.
 
 

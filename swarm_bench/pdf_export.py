@@ -388,8 +388,9 @@ def event_line(event):
         text = who + f"waits {event.get('delay_seconds', 60)}s after a rate limit"
     elif kind == "retry_scheduled" and event.get("reason") == "timeout":
         text = who + f"waits {event.get('delay_seconds', 30)}s after a timeout, then tries again"
-    elif kind == "retry_scheduled" and event.get("reason") in ("network", "server_error"):
-        what = "a network error" if event.get("reason") == "network" else "a server error"
+    elif kind == "retry_scheduled" and event.get("reason") in ("network", "server_error", "incomplete"):
+        what = {"network": "a network error", "server_error": "a server error",
+                "incomplete": "an answer without a reply"}[event.get("reason")]
         text = who + f"waits {event.get('delay_seconds', 30)}s after {what}, then tries again"
     elif kind == "run_stopped_after_agent_error":
         text = who + "failed for good: the run ends with an error"

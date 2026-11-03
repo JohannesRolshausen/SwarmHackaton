@@ -25,11 +25,12 @@ class ProviderErrorTests(unittest.TestCase):
         self.assertEqual(caught.exception.diagnostic['provider_error_code'],503)
         self.assertNotIn('secret-test',str(caught.exception))
 
-    def test_null_message_is_structural_error_not_invented_answer(self):
+    def test_null_message_is_a_wait_not_an_invented_answer(self):
         with self.assertRaises(ProviderError) as caught:
             self.call({'choices':[{'message':None}]})
         self.assertEqual(caught.exception.diagnostic['message_type'],'NoneType')
-        self.assertFalse(caught.exception.retryable)
+        self.assertTrue(caught.exception.diagnostic['incomplete_response'])
+        self.assertTrue(caught.exception.retryable)
 
     def test_null_tools_and_reasoning_usage(self):
         msg, usage = self.call({'choices':[{'message':{'content':'42','tool_calls':None}}],

@@ -80,6 +80,14 @@ class ExplanationTests(unittest.TestCase):
                  "network": ({"network_error": True}, "connection to Google failed"),
                  "server_error": ({"http_status": 503}, "HTTP 503 (service unavailable or overloaded)"),
                  "flex_unavailable": ({"http_status": 429, "flex_unavailable": True}, "no Flex capacity")}
+        more = [("network", {"network_error": True, "cut_off": True}, "broke while the answer was being sent"),
+                ("server_error", {"http_status": 522}, "HTTP 522 (connection timed out behind Cloudflare)"),
+                ("server_error", {"provider_error_code": None, "unspecified_provider_error": True}, "without a code"),
+                ("incomplete", {"incomplete_response": True}, "without a reply to work with")]
+        for reason, diagnostic, text in more:
+            issue = run_issues(state(wait("agent_01", reason, diagnostic),
+                                     agent_status={"agent_01": "rate_limited", "agent_02": "waiting"}))[0]
+            self.assertIn(text, issue["what"], reason)
         for reason, (diagnostic, text) in cases.items():
             issue = run_issues(state(wait("agent_01", reason, diagnostic),
                                      agent_status={"agent_01": "rate_limited", "agent_02": "waiting"}))[0]

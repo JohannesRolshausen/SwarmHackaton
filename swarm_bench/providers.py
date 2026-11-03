@@ -1,5 +1,6 @@
 """Provider adapters. No default credentials, model IDs or network calls at import time."""
 import copy
+import http.client
 import json
 import os
 import re
@@ -64,23 +65,38 @@ def response_diagnostic(data):
             "message_type": type(first.get("message")).__name__ if isinstance(first, dict) else None}
 
 
+def is_wait_status(code):
+    """An HTTP status or provider error code the run waits out: a timeout, a rate limit or any server error."""
+    return isinstance(code, int) and not isinstance(code, bool) and (code in (408, 429) or 500 <= code <= 599)
+
+
+def incomplete(message, data=None, usage=None):
+    """The provider answered, but without a usable reply (empty, null or a failed response). The run waits."""
+    return ProviderError(message + " The run waits and tries again.", usage=usage, retryable=True,
+                         diagnostic={**(response_diagnostic(data) if isinstance(data, dict) else {}),
+                                     "incomplete_response": True})
+
+
 def check_provider_error(data, usage=None):
     error = data.get("error") if isinstance(data, dict) else None
     choices = data.get("choices") if isinstance(data, dict) else None
     if not error and isinstance(choices, list) and choices and isinstance(choices[0], dict):
         error = choices[0].get("error")
     if error:
-        code = error.get("code") if isinstance(error, dict) else None
-        code = code if isinstance(code, int) else None
+        raw_code = error.get("code") if isinstance(error, dict) else None
+        code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
         if code == 402:
             # OpenRouter: no credit left. Only the operator can fix it.
             raise ProviderError("Provider refused the call: no credit left (code 402). "
                                 "The run tries again every minute for 30 minutes, then stops. Add credit.",
                                 usage=usage, diagnostic={**response_diagnostic(data), "provider_error_code": code,
                                                          "action_required": True})
+        # Without any code the error says nothing about the request: treat it like a server error and wait.
+        unspecified = raw_code is None
         raise ProviderError(f"Provider error in JSON (code {code or 'unspecified'}).",
-                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504, 529),
-                            diagnostic={**response_diagnostic(data), "provider_error_code": code})
+                            usage=usage, retryable=unspecified or is_wait_status(code),
+                            diagnostic={**response_diagnostic(data), "provider_error_code": code,
+                                        **({"unspecified_provider_error": True} if unspecified else {})})
 
 
 def thinking_always_on(model):
@@ -602,7 +618,7 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                                 "The run waits and tries again, after two misses in a row with standard processing.",
                                 retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
-                            retryable=exc.code in (408, 429, 500, 502, 503, 504, 529), diagnostic=diagnostic) from None
+                            retryable=is_wait_status(exc.code), diagnostic=diagnostic) from None
     except TimeoutError as exc:
         if wire is not None:
             wire.failed("timeout", exc)
@@ -610,6 +626,12 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                             retryable=True,
                             diagnostic={"timeout_seconds": timeout, **({"service_tier": "flex", "flex_unavailable": True}
                                                                        if flex else {})}) from None
+    except http.client.HTTPException as exc:
+        # The connection broke while the answer was sent (IncompleteRead) or the reply was no valid HTTP.
+        if wire is not None:
+            wire.failed("connection broke off", exc)
+        raise ProviderError("The connection to the provider broke off during the answer. The run waits and tries again.",
+                            retryable=True, diagnostic={"network_error": True, "cut_off": True}) from None
     except (URLError, OSError) as exc:
         if wire is not None:
             wire.failed("connection failed", exc)
@@ -618,6 +640,8 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     except ValueError:
         raise ProviderError("The provider sent a response that is not valid JSON. The run waits and tries again.",
                             retryable=True, diagnostic={"invalid_json": True}) from None
+    if data is None:
+        raise incomplete("The provider sent an empty answer (null).")
     if not isinstance(data, dict):
         raise ProviderError("Response format incompatible with the chosen profile")
     usage = data.get("usage")
@@ -677,6 +701,8 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                 message += " Thinking tokens used the rest of the cap and were omitted from the visible output count."
             raise ProviderError(message, usage=reported_usage)
         if profile["kind"] == "openai_responses":
+            if data.get("status") in ("failed", "incomplete"):
+                raise incomplete(f"Responses API call ended with status {data['status']}.", data, reported_usage)
             if data.get("status") != "completed" or not isinstance(data.get("output"), list):
                 raise ProviderError("Responses API call did not complete.", usage=reported_usage)
             items = data["output"]
@@ -704,6 +730,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             calls = [{"id": b["id"], "type": "function", "function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
                      for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
         else:
+            choices = data.get("choices")
+            if choices == [] or isinstance(choices, list) and isinstance(choices[0], dict) and choices[0].get("message") is None:
+                # OpenRouter does this when the model behind it fails: no reply to work with.
+                raise incomplete("The provider answered without a reply.", data, reported_usage)
             original = data["choices"][0]["message"]
             if not isinstance(original, dict):
                 raise TypeError("message must be an object")
