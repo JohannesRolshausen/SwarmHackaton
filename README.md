@@ -60,10 +60,9 @@ Closing the browser does not stop a run; keep the machine awake and online. To c
 
 ## Provider waits and OpenAI Flex
 
-- A rate limit (HTTP 429) pauses the agent: it waits 60 s and tries again, as often as needed.
-- A timeout pauses the agent for 30 s, then it tries again. The third timeout in a row stops the agent with a message: a provider that never answers needs a look. A successful call resets the count.
-- A 429 that means no credit or a reached spend limit (`credit_balance_exhausted`, `insufficient_quota`, `project_spend_limit_exceeded`, `organization_spend_limit_exceeded`, `organization_usage_limit_exceeded`) is retried every minute for 30 minutes, so there is time to add credit or raise the limit. After that the agent stops with a message.
-- None of these attempts count toward the call limit. In rounds the turn stays with the waiting agent. When Lena stops, the run ends.
+- Waiting for a provider pauses the agent and never ends a run. It waits and tries again, as often as needed: 60 s after a rate limit (HTTP 429) or a server error (408, 500, 502, 503, 504), 30 s after a timeout, a network error or a response that is not valid JSON. These attempts do not count toward the call limit. In rounds the turn stays with the waiting agent.
+- Missing credit or a reached spend limit is retried every minute for 30 minutes, so there is time to add credit or raise the limit. After that the agent stops with a message. The lab recognizes OpenAI (429 with `credit_balance_exhausted`, `insufficient_quota`, `project_spend_limit_exceeded`, `organization_spend_limit_exceeded` or `organization_usage_limit_exceeded`), OpenRouter (402) and Anthropic (400 whose message names the credit balance).
+- Any other provider error (wrong key, unknown model, invalid request) stops the agent at once. The group-spending designs set `rules.stop_on_agent_error`: when any agent stops this way, the whole run ends with status `error` and finish reason `agent_error`, so it is restarted instead of counted with one colleague fewer.
 - A profile with the OpenAI Responses format can set a service tier. With Flex (`service_tier: flex`, half price, slower) the lab waits up to 18 minutes for an answer. After a Flex timeout, or after the second Flex 429 in a row, it sends that one call with standard processing (event `service_tier_fallback`) and tries Flex again on the next call. The tier OpenAI reports for each call is stored and exported as `leader_service_tiers`.
 
 ## Traces and credentials

@@ -27,7 +27,7 @@ A design never holds model profiles or API keys. Each run stores a frozen copy o
 | `custom_tools[]` | Action tools without code. |
 | `controller_messages[]` | Messages from outside the group after a number of board messages. |
 | `measures[]` | Limits checked against custom tool calls, for analysis. Never sent to a model. |
-| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), and `turn_order` (see [Turn order](#turn-order)). |
+| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)) and `stop_on_agent_error` (see the table below). |
 | `run_defaults` | `call_limit`, `max_output_tokens`, `total_output_tokens`, `temperature`, filled into the Experiment page; each run can change them. |
 
 ### Roles
@@ -202,6 +202,7 @@ Everything else is optional.
 | `rules.idle_wait_seconds` | `2` | 0–60 |
 | `rules.stop_on_breach` | `false` | `true`, `false` |
 | `rules.turn_order` | `free` | `free`, `rounds` (needs a leading role with one agent and `idle_policy` `finish`) |
+| `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) never count as failing. |
 | `run_defaults.call_limit` | `24` | 1–500 |
 | `run_defaults.max_output_tokens` | `16000` | 128–400,000 |
 | `run_defaults.total_output_tokens` | `1500000` | 128–1,000,000,000 |

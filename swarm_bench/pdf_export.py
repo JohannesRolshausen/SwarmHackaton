@@ -301,7 +301,7 @@ LOG_KINDS = {
     "operator_pause", "operator_stop", "agent_finished", "arc_initial", "arc_action",
     "continuation_requested", "token_limit", "budget_limit", "model_error", "retry_scheduled",
     "board_message_limit_reached", "order_placed", "order_deadline", "order_reminder",
-    "custom_action", "controller_message", "round_order", "service_tier_fallback",
+    "custom_action", "controller_message", "round_order", "service_tier_fallback", "run_stopped_after_agent_error",
 }
 
 
@@ -388,6 +388,11 @@ def event_line(event):
         text = who + f"waits {event.get('delay_seconds', 60)}s after a rate limit"
     elif kind == "retry_scheduled" and event.get("reason") == "timeout":
         text = who + f"waits {event.get('delay_seconds', 30)}s after a timeout, then tries again"
+    elif kind == "retry_scheduled" and event.get("reason") in ("network", "server_error"):
+        what = "a network error" if event.get("reason") == "network" else "a server error"
+        text = who + f"waits {event.get('delay_seconds', 30)}s after {what}, then tries again"
+    elif kind == "run_stopped_after_agent_error":
+        text = who + "failed for good: the run ends with an error"
     elif kind == "retry_scheduled" and event.get("reason") == "action_required":
         text = who + f"waits {event.get('delay_seconds', 60)}s: no credit or a spend limit reached"
     elif kind == "retry_scheduled" and event.get("reason") == "flex_unavailable":

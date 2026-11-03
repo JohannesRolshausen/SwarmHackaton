@@ -170,29 +170,35 @@ class RoundsTests(RunHelper):
         self.assertEqual(reasons, ["rate_limit", "timeout", "rate_limit", "timeout", "rate_limit"])
         self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
 
-    def test_the_third_timeout_in_a_row_stops_the_agent(self):
-        timed_out = ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 380})
-        recorder = Recorder(fail={("seller-1", n): timed_out for n in range(1, 4)})
-        run = self.run_rounds(rounds_design(after_rounds=1), recorder)
-        self.assertEqual(sum(c[0] == "seller-1" for c in recorder.calls), 3)
-        error = next(e for e in run.state["events"] if e["kind"] == "error")
-        self.assertEqual(error["agent_id"], "agent_02")
-        self.assertIn("3 times in a row", error["message"])
-        self.assertNotIn("agent_02", [n["agent_id"] for n in run.state["notes"]])
-        self.assertEqual(run.state["finish_reason"], "action_ended")  # The others went on without that seller.
-        # Two timeouts, then an answer: the count starts again.
-        recorder = Recorder(fail={("seller-1", 1): timed_out, ("seller-1", 2): timed_out,
-                                  ("seller-1", 4): timed_out, ("seller-1", 5): timed_out})
-        run = self.run_rounds(rounds_design(after_rounds=2), recorder)
+    def test_timeouts_server_and_network_errors_never_end_the_run(self):
+        waits = [ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 1080}),
+                 ProviderError("HTTP 503", retryable=True, diagnostic={"http_status": 503}),
+                 ProviderError("Connection failed", retryable=True, diagnostic={"network_error": True}),
+                 ProviderError("not JSON", retryable=True, diagnostic={"invalid_json": True}),
+                 ProviderError("JSON 502", retryable=True, diagnostic={"provider_error_code": 502})]
+        # Six timeouts in a row for the leader, then each other kind for a seller.
+        fail = {("buyer", n): waits[0] for n in range(1, 7)}
+        fail.update({("seller-1", n): waits[n - 1] for n in range(1, 6)})
+        recorder = Recorder(fail=fail)
+        run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True), recorder, call_limit=3)
         self.assertFalse([e for e in run.state["events"] if e["kind"] == "error"])
-        self.assert_rounds(run, 2)
+        self.assert_rounds(run, 1)
+        reasons = [e["reason"] for e in run.state["events"] if e["kind"] == "retry_scheduled"]
+        self.assertEqual(reasons, ["timeout"] * 6 + ["timeout", "server_error", "network", "network", "server_error"])
+        self.assertEqual((run.state["usage"]["agent_01"]["calls"], run.state["usage"]["agent_02"]["calls"]), (2, 1))
+        self.assertEqual(run.state["finish_reason"], "action_ended")
 
-    def test_the_leader_timing_out_three_times_ends_the_run(self):
-        timed_out = ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 1080})
-        recorder = Recorder(fail={("buyer", n): timed_out for n in range(1, 4)})
-        run = self.run_rounds(rounds_design(after_rounds=1), recorder)
-        self.assertEqual({c[0] for c in recorder.calls}, {"buyer"})
-        self.assertEqual(run.state["status"], "error")
+    def test_an_agent_that_fails_for_good_ends_the_run_when_the_design_asks(self):
+        broken = ProviderError("Provider returned HTTP 400.", diagnostic={"http_status": 400})
+        recorder = Recorder(fail={("seller-2", 1): broken})
+        run = self.run_rounds(rounds_design(after_rounds=2, stop_on_agent_error=True), recorder)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        self.assertEqual(run.state["agent_status"]["agent_03"], "error")
+        self.assertNotIn("error", [run.state["agent_status"][a] for a in ("agent_01", "agent_02", "agent_04")])
+        self.assertTrue(any(e["kind"] == "run_stopped_after_agent_error" for e in run.state["events"]))
+        # Nobody spoke after the failure.
+        failure = next(i for i, c in enumerate(recorder.calls) if c[0] == "seller-2")
+        self.assertEqual(len(recorder.calls), failure + 1)
 
     def test_no_credit_is_retried_for_a_while_then_stops(self):
         refused = ProviderError("Provider refused the call: no credit left (credit_balance_exhausted).",
@@ -210,10 +216,11 @@ class RoundsTests(RunHelper):
             def slow(*args):
                 time.sleep(0.01)
                 return recorder(*args)
-            run = self.run_rounds(rounds_design(after_rounds=1), slow)
+            run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True), slow)
         error = next(e for e in run.state["events"] if e["kind"] == "error")
         self.assertEqual(error["agent_id"], "agent_03")
         self.assertIn("This agent stops", error["message"])
+        self.assertEqual(run.state["finish_reason"], "agent_error")
 
     def test_an_agent_that_fails_for_good_passes_its_turn_on(self):
         broken = ProviderError("Provider returned HTTP 400.", diagnostic={"http_status": 400})
@@ -350,6 +357,37 @@ class FlexProviderTests(unittest.TestCase):
             self.assertFalse(_is_rate_limit(caught.exception))
             self.assertIn(code, str(caught.exception))
             self.assertNotIn("sk-test", str(caught.exception) + json.dumps(caught.exception.diagnostic))
+
+    def test_credit_errors_of_openrouter_and_anthropic_are_recognized(self):
+        openrouter = {"kind": "openai_compatible", "model": "xiaomi/mimo", "base_url": "https://openrouter.ai/api/v1"}
+        anthropic = {"kind": "anthropic", "model": "claude-opus-5-5", "base_url": "https://api.anthropic.com/v1"}
+        for profile, reply in ((openrouter, ErrorReply(402, 402)), (anthropic, ErrorReply(400, "invalid_request_error"))):
+            if profile is anthropic:
+                reply.body = json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                    "message": "Your credit balance is too low to access the Anthropic API."}}).encode()
+            with self.subTest(profile["kind"]), self.assertRaises(ProviderError) as caught:
+                self.request(reply, profile)
+            self.assertTrue(caught.exception.diagnostic["action_required"])
+            self.assertNotIn("Anthropic API", str(caught.exception))
+        # OpenRouter can also put the 402 into a 200 response.
+        with self.assertRaises(ProviderError) as caught:
+            self.request({"error": {"code": 402, "message": "Insufficient credits"}}, openrouter)
+        self.assertTrue(caught.exception.diagnostic["action_required"])
+        # Any other 400 stays an error that does not wait.
+        other = ErrorReply(400, "invalid_request_error")
+        other.body = json.dumps({"error": {"type": "invalid_request_error", "message": "tools: bad schema"}}).encode()
+        with self.assertRaises(ProviderError) as caught:
+            self.request(other, anthropic)
+        self.assertNotIn("action_required", caught.exception.diagnostic)
+        self.assertFalse(caught.exception.retryable)
+
+    def test_a_connection_error_is_a_wait(self):
+        with patch("swarm_bench.providers.build_opener") as opener:
+            opener.return_value.open.side_effect = ConnectionResetError()
+            with self.assertRaises(ProviderError) as caught:
+                completion(self.profile, "sk-test", [{"role": "user", "content": "hi"}], [], 16000)
+        self.assertTrue(caught.exception.retryable)
+        self.assertTrue(caught.exception.diagnostic["network_error"])
 
     def test_profile_accepts_a_tier_only_for_the_responses_format(self):
         with tempfile.TemporaryDirectory() as folder:

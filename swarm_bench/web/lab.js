@@ -37,6 +37,7 @@ Object.assign(HELP, {
   "lab-tool-ends": {label: "Ends the run", text: "The first call ends the run for everyone, like placing the order in GPU procurement. Later tool calls of the same response receive: The experiment has ended."},
   "lab-msg-after": {label: "After board messages", text: "The message is sent once the board holds this many messages. Each controller message is sent once."},
   "lab-msg-rounds": {label: "After rounds", text: "With turn order Rounds: the message is sent once this many rounds are complete, that is after the last other agent of that round. Leave it empty to count board messages instead."},
+  "lab-agent-error": {label: "End the run when an agent fails", text: "Off: the other agents go on without an agent that failed for good (a provider error that is not a wait, or no credit for 30 minutes). On: the run ends with status error and finish reason agent_error, so it can be restarted instead of counted. Waits for the provider (rate limits, timeouts, server and network errors) never count as failing."},
   "lab-turn-order": {label: "Turn order", text: "Free: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers.\n\nRounds: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts or answers without a tool. Waiting for a provider (rate limit, timeout, Flex queue) keeps the turn, so slow providers change nothing in the conversation. The order comes from the operating system's random source, not from the run seed, and is stored in the run."},
   "lab-msg-roles": {label: "Recipients", text: "Every agent of the checked roles receives the message as a user message with its next request. Placeholders are filled per agent."},
   "lab-msg-stop": {label: "Stop the other roles", text: "Agents of roles that do not receive the message stop; requests already in flight still land. The recipients go on until they stop acting or reach the call limit."},
@@ -78,7 +79,7 @@ function labBlankDesign() {
     shared_prompt: "Work with the other participants on the task. Communicate through the shared notes board.",
     shared_files: {}, roles: [labBlankRole("participant", 3)], custom_tools: [], controller_messages: [], measures: [],
     rules: {board_delivery: "tool_only", board_message_limit: null, wait_for_peer_after_post: false, answer_policy: "none",
-      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free"},
+      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free", stop_on_agent_error: false},
     run_defaults: {call_limit: 24, max_output_tokens: 16000, total_output_tokens: 1500000, temperature: 0.7}};
 }
 // Editing model: files as lists, so a file can be renamed while typing; a role's own task as an on/off switch.
@@ -283,6 +284,7 @@ function labPanelRules() {
       ${labSelect("When agents stop acting", "rules.idle_policy", [["finish", "End the run"], ["continue", "Continue until call limit"]], {help: "idle-policy", rerender: true})}
       ${labDraft.rules.idle_policy === "continue" ? labInput("Wait before continuation · seconds", "rules.idle_wait_seconds", {help: "idle-wait", kind: "int", type: "number", attrs: 'min="0" max="60"'}) : ""}
       ${labCheck("Stop the run at the first breach", "rules.stop_on_breach")}
+      ${labCheck("End the run with an error when an agent fails for good", "rules.stop_on_agent_error", {help: "lab-agent-error"})}
     </div><div>
       <h3 class="lab-subhead">Run defaults</h3><p class="hint">Filled into the Experiment page when you pick this design. Each run can change them.</p>
       ${labInput("Max calls / agent", "run_defaults.call_limit", {help: "call-limit", kind: "int", type: "number", attrs: 'min="1" max="500"'})}

@@ -68,7 +68,29 @@ def _is_action_required(exc):
     return bool((getattr(exc, "diagnostic", None) or {}).get("action_required"))
 
 
-TIMEOUTS_IN_A_ROW = 3  # The third timeout in a row ends the agent: a provider that never answers needs a look.
+SERVER_ERRORS = (408, 500, 502, 503, 504)
+
+
+def _wait_reason(exc):
+    """Why a provider error only pauses the agent, or None when it is not a wait.
+
+    A wait is retried without limit and never uses the call limit: it says nothing about the model."""
+    diagnostic = getattr(exc, "diagnostic", None) or {}
+    if _is_action_required(exc):
+        return "action_required"
+    if _is_rate_limit(exc):
+        return "flex_unavailable" if diagnostic.get("flex_unavailable") else "rate_limit"
+    if _is_timeout(exc):
+        return "timeout"
+    if diagnostic.get("network_error") or diagnostic.get("invalid_json"):
+        return "network"
+    if diagnostic.get("http_status") in SERVER_ERRORS or diagnostic.get("provider_error_code") in SERVER_ERRORS:
+        return "server_error"
+    return None
+
+
+WAIT_SECONDS = {"action_required": 60, "rate_limit": 60, "flex_unavailable": 60, "timeout": 30, "network": 30,
+                "server_error": 60}
 ACTION_REQUIRED_WAIT_SECONDS = 1800  # Time to add credit or raise a limit before the agent stops.
 
 
@@ -1578,9 +1600,9 @@ class LabRun:
             if reserve is not None and usage is not None and usage.get("cost_usd") is not None:
                 with self.lock:
                     self.state["reserved_cost_usd"] += usage["cost_usd"] - reserve
-            if _is_rate_limit(exc) or _is_timeout(exc) or _is_action_required(exc):
-                # A rejected call never reached the model. A timed-out one says nothing about the model either.
-                # Give the attempt back, so waiting for the provider never uses up the call limit.
+            if _wait_reason(exc):
+                # A rejected call never reached the model. A timed-out or failed one says nothing about the model
+                # either. Give the attempt back, so waiting for the provider never uses up the call limit.
                 self.release_rate_limit_attempt(agent, output_budget, usage)
             if (getattr(exc, "diagnostic", None) or {}).get("flex_unavailable"):
                 with self.lock:
@@ -1727,7 +1749,6 @@ class LabRun:
 
     def agent_loop(self, agent):
         consecutive_failures = 0
-        timeouts = 0  # In a row, across tiers; a successful call resets it.
         action_required_since = None  # When the current run of no-credit or spend-limit errors began.
         try:
             while not self.pause_requested.is_set():
@@ -1786,33 +1807,22 @@ class LabRun:
                     else:
                         try:
                             self.continuing_tools[agent] = self.live_call(agent)
-                            consecutive_failures, timeouts, action_required_since = 0, 0, None
+                            consecutive_failures, action_required_since = 0, None
                             if not self.continuing_tools[agent] and self.state.get("rounds"):
                                 with self.changed:
                                     self.end_turn(agent)
                         except ProviderError as exc:
-                            timeout, action = _is_timeout(exc), _is_action_required(exc)
-                            if timeout:
-                                timeouts += 1
-                                if timeouts >= TIMEOUTS_IN_A_ROW:
-                                    raise ProviderError(
-                                        f"Provider did not respond in time {timeouts} times in a row "
-                                        f"(last wait {exc.diagnostic['timeout_seconds']} s). This agent stops. "
-                                        "Check the provider's status page and the wire log.",
-                                        diagnostic={**exc.diagnostic, "timeouts_in_a_row": timeouts}) from None
-                            if action:
+                            reason = _wait_reason(exc)
+                            if reason == "action_required":
                                 action_required_since = action_required_since or monotonic()
                                 if monotonic() - action_required_since >= ACTION_REQUIRED_WAIT_SECONDS:
                                     raise ProviderError(
                                         f"{exc} Still refused after {ACTION_REQUIRED_WAIT_SECONDS // 60} minutes. "
                                         "This agent stops.", diagnostic=exc.diagnostic) from None
-                            if _is_rate_limit(exc) or timeout or action:
+                            if reason:
                                 # Waiting for the provider pauses the run. Spread retries so ten agents
                                 # do not wake on the same second. In rounds the turn stays with this agent.
-                                delay = (30 if timeout else 60) + self.agents.index(agent) * 5
-                                reason = ("action_required" if action else
-                                          "flex_unavailable" if exc.diagnostic.get("flex_unavailable") and not timeout
-                                          else "timeout" if timeout else "rate_limit")
+                                delay = WAIT_SECONDS[reason] + self.agents.index(agent) * 5
                                 with self.changed:
                                     self.state["agent_status"][agent] = "rate_limited"
                                     if agent in self.state["active_agents"]:
@@ -1843,6 +1853,16 @@ class LabRun:
                 self.state["agent_status"][agent] = "error"
                 self.state["error"] = message
                 self.event("error", agent, message=message)
+                if (self.config["scenario"] == DESIGNED and self.config["design"]["rules"].get("stop_on_agent_error")
+                        and self.state["status"] not in ("complete", "stopped")):
+                    # Going on with one agent fewer would measure a different setup. End the run as a technical
+                    # failure, so it is restarted instead of counted.
+                    self.state.update(status="error", finish_reason="agent_error")
+                    for other in self.agents:
+                        if other != agent and self.state["agent_status"][other] not in ("error", "done", "limit"):
+                            self.state["agent_status"][other] = "stopped"
+                    self.event("run_stopped_after_agent_error", agent)
+                    self.pause_requested.set()
                 self.finish_if_idle()
                 self.changed.notify_all()
         finally:

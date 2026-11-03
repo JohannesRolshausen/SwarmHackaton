@@ -28,6 +28,16 @@ SERVICE_TIERS = ("", "auto", "default", "flex", "priority")
 FLEX_TIMEOUT_SECONDS = 1080
 
 
+def credit_too_low(raw):
+    """Anthropic reports missing credit as a plain 400 and names it only in the message. Only a flag is kept."""
+    try:
+        error = json.loads(raw).get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return isinstance(message, str) and "credit balance" in message.lower()
+
+
 def error_code(raw):
     """error.code (or error.type) from an error body. Only a short identifier is kept, never the message."""
     try:
@@ -62,6 +72,12 @@ def check_provider_error(data, usage=None):
     if error:
         code = error.get("code") if isinstance(error, dict) else None
         code = code if isinstance(code, int) else None
+        if code == 402:
+            # OpenRouter: no credit left. Only the operator can fix it.
+            raise ProviderError("Provider refused the call: no credit left (code 402). "
+                                "The run tries again every minute for 30 minutes, then stops. Add credit.",
+                                usage=usage, diagnostic={**response_diagnostic(data), "provider_error_code": code,
+                                                         "action_required": True})
         raise ProviderError(f"Provider error in JSON (code {code or 'unspecified'}).",
                             usage=usage, retryable=code in (408, 429, 500, 502, 503, 504),
                             diagnostic={**response_diagnostic(data), "provider_error_code": code})
@@ -574,7 +590,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         diagnostic = {"http_status": exc.code, **({"provider_error_code_name": code} if code else {}),
                       **({"service_tier": "flex"} if flex else {})}
         # Never echo the response body, URL or headers: a gateway may reflect a key.
-        if exc.code == 429 and code in ACTION_REQUIRED_CODES:
+        if (exc.code == 429 and code in ACTION_REQUIRED_CODES or exc.code == 402
+                or exc.code == 400 and profile["kind"] == "anthropic" and credit_too_low(raw_error)):
+            # OpenAI: 429 with a billing code. OpenRouter: 402. Anthropic: 400 that names the credit balance.
+            code = code or ("credit_balance_too_low" if exc.code == 400 else f"http_{exc.code}")
             raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
                                 "The run tries again every minute for 30 minutes, then stops. Add credit or raise the limit.",
                                 diagnostic={**diagnostic, "action_required": True}) from None
@@ -591,10 +610,14 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                             retryable=True,
                             diagnostic={"timeout_seconds": timeout, **({"service_tier": "flex", "flex_unavailable": True}
                                                                        if flex else {})}) from None
-    except (URLError, OSError, ValueError) as exc:
-        if wire is not None and not isinstance(exc, ValueError):
+    except (URLError, OSError) as exc:
+        if wire is not None:
             wire.failed("connection failed", exc)
-        raise ProviderError("Connection failed or invalid JSON from provider") from None
+        raise ProviderError("Connection to the provider failed. The run waits and tries again.", retryable=True,
+                            diagnostic={"network_error": True}) from None
+    except ValueError:
+        raise ProviderError("The provider sent a response that is not valid JSON. The run waits and tries again.",
+                            retryable=True, diagnostic={"invalid_json": True}) from None
     if not isinstance(data, dict):
         raise ProviderError("Response format incompatible with the chosen profile")
     usage = data.get("usage")

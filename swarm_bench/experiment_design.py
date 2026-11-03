@@ -362,7 +362,8 @@ def validate_design(raw):
              "idle_policy": _choice(rules_raw.get("idle_policy"), "When agents stop acting", ("finish", "continue"), "finish"),
              "idle_wait_seconds": _integer(rules_raw.get("idle_wait_seconds"), "Wait before continuation", 0, 60, 2),
              "stop_on_breach": _flag(rules_raw.get("stop_on_breach"), "Stop at the first breach"),
-             "turn_order": _choice(rules_raw.get("turn_order"), "Turn order", ("free", "rounds"), "free")}
+             "turn_order": _choice(rules_raw.get("turn_order"), "Turn order", ("free", "rounds"), "free"),
+             "stop_on_agent_error": _flag(rules_raw.get("stop_on_agent_error"), "Stop the run when an agent fails")}
     if rules["turn_order"] == "rounds":
         lead = next((r for r in roles if r["leader"]), None)
         if lead is None or lead["count"] != 1:
