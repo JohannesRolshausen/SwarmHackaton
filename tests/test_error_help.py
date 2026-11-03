@@ -39,7 +39,7 @@ class ExplanationTests(unittest.TestCase):
         issue = issues[0]
         self.assertEqual(issue["title"], "Rate limit at Google")
         self.assertTrue(issue["continues"])
-        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["severity"], "warning")
         self.assertEqual(issue["original"], "Provider returned HTTP 429. Check the profile and limits.")
         self.assertEqual(datetime.fromisoformat(issue["resume_at"]) - datetime.fromisoformat(AT), timedelta(seconds=60))
 
@@ -63,10 +63,17 @@ class ExplanationTests(unittest.TestCase):
         later = (datetime.fromisoformat(AT) + timedelta(minutes=3)).isoformat()
         events = wait("agent_01", "action_required", refused) + wait("agent_01", "action_required", refused, at=later)
         issue = run_issues(state(events, agent_status={"agent_01": "rate_limited", "agent_02": "waiting"}))[0]
-        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["severity"], "error")
         self.assertIn("insufficient_quota", issue["what"])
         self.assertIn("Add credit", issue["todo"])
         self.assertEqual(datetime.fromisoformat(issue["gives_up_at"]) - datetime.fromisoformat(AT), timedelta(minutes=30))
+
+    def test_a_used_up_token_budget_is_red(self):
+        run = state([], status="stopped", finish_reason="token_limit")
+        run["token_budget"] = {"accounted": 99900, "limit": 100000, "in_flight": 0}
+        issue = run_issues(run)[0]
+        self.assertEqual((issue["severity"], issue["title"], issue["continues"]), ("error", "Token budget used up", False))
+        self.assertIn("99,900 of 100,000", issue["what"])
 
     def test_each_wait_reason_has_its_own_explanation(self):
         cases = {"timeout": ({"timeout_seconds": 380}, "did not answer within 380 seconds"),

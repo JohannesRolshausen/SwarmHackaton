@@ -446,6 +446,7 @@ function renderAgentTokens(){
 }
 // Error banner: each problem of the run with what happened, whether the run goes on by itself and what to do.
 // The server derives the issues from the run (swarm_bench/error_help.py); here only the time is filled in.
+// Orange (warning): the run goes on by itself. Red (error): the operator has to act.
 function inAbout(seconds){if(seconds<=5)return "now";if(seconds<55)return `in about ${Math.max(5,Math.round(seconds/5)*5)} seconds`;const m=Math.round(seconds/60);return `in about ${m} minute${m===1?"":"s"}`;}
 function issueTiming(el){
   const left=(Date.parse(el.dataset.until)-Date.now())/1000;
@@ -460,7 +461,7 @@ function renderIssues(issues){
   box.innerHTML=issues.map(i=>{
     const names=(i.agents||[]).map(a=>esc(who(a))).join(", ");
     const timing=i.kind==="wait"?(i.resume_at?`<span data-timing="resume" data-until="${esc(i.resume_at)}"></span>`:"The run waits and tries again by itself.")+(i.gives_up_at?` <span data-timing="give-up" data-until="${esc(i.gives_up_at)}"></span>`:""):`It does not go on by itself.${i.consequence?" "+esc(i.consequence):""}`;
-    const tag=i.kind==="wait"&&i.severity==="info"?"Continues by itself":i.kind==="wait"?"Action needed soon":"Action needed";
+    const tag=i.kind==="wait"&&i.severity!=="error"?"Continues by itself":"Action needed";
     return `<div class="issue ${esc(i.severity)}" role="${i.severity==="error"?"alert":"status"}"><div class="issue-head"><span class="issue-tag">${tag}</span><strong>${esc(i.title)}</strong>${names?`<span class="issue-agents">${names}</span>`:""}</div><p>${esc(i.what)} ${timing}</p>${i.todo?`<p class="issue-todo"><b>What to do:</b> ${esc(i.todo)}</p>`:""}${i.original?`<p class="issue-original">Original message: <code>${esc(i.original)}</code></p>`:""}</div>`;
   }).join("");
   updateIssueTimes();

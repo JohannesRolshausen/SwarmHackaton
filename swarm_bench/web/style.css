@@ -348,3 +348,4 @@ body.modal-open .configuration{overflow:hidden}
 [data-theme="dark"] .issue.warning{background:var(--amber-soft);border-color:#5a4830;border-left-color:var(--amber);color:#e8c48a}
 [data-theme="dark"] .issue.error{background:var(--red-soft);border-color:#6a3d36;border-left-color:var(--red);color:#f0b0a4}
 [data-theme="dark"] .issue-tag{background:#00000040}
+[data-theme="dark"] .error-box{border-color:#6a3d36;color:#f0b0a4}

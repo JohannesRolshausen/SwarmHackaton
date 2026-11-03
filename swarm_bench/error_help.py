@@ -201,7 +201,8 @@ def run_issues(state):
                 reason = wait.get("reason") or "retry"
                 title, what, todo = explain_wait(reason, diagnostic, failure.get("provider") or profile)
                 delay = wait.get("delay_seconds", 10 * (wait.get("attempt") or 1))
-                issue = {"kind": "wait", "severity": "warning" if reason == "action_required" else "info",
+                # Orange: the run goes on by itself. Red: missing credit needs the operator before the agent stops.
+                issue = {"kind": "wait", "severity": "error" if reason == "action_required" else "warning",
                          "reason": reason, "title": title, "what": what, "continues": True, "todo": todo,
                          "original": failure.get("message"), "resume_at": _later(wait.get("at"), delay),
                          "agents": [agent]}
@@ -235,6 +236,15 @@ def run_issues(state):
         title, what, todo = explain_failure("Internal execution error", {}, {}, run_ends=False, resumable=False)
         issues.append({"kind": "run", "severity": "error", "title": title, "what": what, "continues": False,
                        "consequence": "The run stopped.", "todo": todo, "original": state.get("error"), "agents": []})
+    if state.get("finish_reason") == "token_limit":
+        budget = state.get("token_budget") or {}
+        used = (f" ({budget['accounted']:,} of {budget['limit']:,} output tokens)"
+                if "accounted" in budget and "limit" in budget else "")
+        issues.append({"kind": "run", "severity": "error", "title": "Token budget used up",
+                       "what": f"The group used up its shared output token budget{used}.", "continues": False,
+                       "consequence": "The run stopped.",
+                       "todo": "Start a new run with a larger output token budget (total_output_tokens).",
+                       "original": None, "agents": []})
     return _group(issues)
 
 
