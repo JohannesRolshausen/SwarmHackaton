@@ -24,8 +24,8 @@ class ProviderError(Exception):
 ACTION_REQUIRED_CODES = ("credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
                          "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "billing_hard_limit_reached")
 SERVICE_TIERS = ("", "auto", "default", "flex", "priority")
-# OpenAI's Flex guide raises the SDK timeout to 15 minutes. Twice that, since a timeout cancels the response.
-FLEX_TIMEOUT_SECONDS = 1800
+# OpenAI's Flex guide raises the SDK timeout to 15 minutes. A little more, since a timeout cancels the response.
+FLEX_TIMEOUT_SECONDS = 1080
 
 
 def error_code(raw):
@@ -576,7 +576,7 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         # Never echo the response body, URL or headers: a gateway may reflect a key.
         if exc.code == 429 and code in ACTION_REQUIRED_CODES:
             raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
-                                "The run cannot go on by itself. Add credit or raise the limit, then resume the run.",
+                                "The run tries again every minute for 30 minutes, then stops. Add credit or raise the limit.",
                                 diagnostic={**diagnostic, "action_required": True}) from None
         if exc.code == 429 and flex:
             raise ProviderError("OpenAI Flex has no capacity right now (HTTP 429, not charged). "

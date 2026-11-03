@@ -388,6 +388,8 @@ def event_line(event):
         text = who + f"waits {event.get('delay_seconds', 60)}s after a rate limit"
     elif kind == "retry_scheduled" and event.get("reason") == "timeout":
         text = who + f"waits {event.get('delay_seconds', 30)}s after a timeout, then tries again"
+    elif kind == "retry_scheduled" and event.get("reason") == "action_required":
+        text = who + f"waits {event.get('delay_seconds', 60)}s: no credit or a spend limit reached"
     elif kind == "retry_scheduled" and event.get("reason") == "flex_unavailable":
         text = who + f"waits {event.get('delay_seconds', 60)}s: OpenAI Flex had no capacity"
     elif kind == "round_order":

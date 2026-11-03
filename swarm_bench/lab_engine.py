@@ -63,6 +63,15 @@ def _is_timeout(exc):
     return "timeout_seconds" in (getattr(exc, "diagnostic", None) or {})
 
 
+def _is_action_required(exc):
+    """No credit or a spend limit: only the operator can fix it."""
+    return bool((getattr(exc, "diagnostic", None) or {}).get("action_required"))
+
+
+TIMEOUTS_IN_A_ROW = 3  # The third timeout in a row ends the agent: a provider that never answers needs a look.
+ACTION_REQUIRED_WAIT_SECONDS = 1800  # Time to add credit or raise a limit before the agent stops.
+
+
 # The turn order in rounds and the gaps between channel times come from the operating system's random source.
 # The run seed plays no part, so runs with the same seed still draw their own. What was drawn is stored in the run.
 SYSTEM_RANDOM = random.SystemRandom()
@@ -1569,7 +1578,7 @@ class LabRun:
             if reserve is not None and usage is not None and usage.get("cost_usd") is not None:
                 with self.lock:
                     self.state["reserved_cost_usd"] += usage["cost_usd"] - reserve
-            if _is_rate_limit(exc) or _is_timeout(exc):
+            if _is_rate_limit(exc) or _is_timeout(exc) or _is_action_required(exc):
                 # A rejected call never reached the model. A timed-out one says nothing about the model either.
                 # Give the attempt back, so waiting for the provider never uses up the call limit.
                 self.release_rate_limit_attempt(agent, output_budget, usage)
@@ -1718,6 +1727,8 @@ class LabRun:
 
     def agent_loop(self, agent):
         consecutive_failures = 0
+        timeouts = 0  # In a row, across tiers; a successful call resets it.
+        action_required_since = None  # When the current run of no-credit or spend-limit errors began.
         try:
             while not self.pause_requested.is_set():
                 with self.changed:
@@ -1775,17 +1786,32 @@ class LabRun:
                     else:
                         try:
                             self.continuing_tools[agent] = self.live_call(agent)
-                            consecutive_failures = 0
+                            consecutive_failures, timeouts, action_required_since = 0, 0, None
                             if not self.continuing_tools[agent] and self.state.get("rounds"):
                                 with self.changed:
                                     self.end_turn(agent)
                         except ProviderError as exc:
-                            if _is_rate_limit(exc) or _is_timeout(exc):
-                                # Waiting for the provider never ends the run. Spread retries so ten agents
+                            timeout, action = _is_timeout(exc), _is_action_required(exc)
+                            if timeout:
+                                timeouts += 1
+                                if timeouts >= TIMEOUTS_IN_A_ROW:
+                                    raise ProviderError(
+                                        f"Provider did not respond in time {timeouts} times in a row "
+                                        f"(last wait {exc.diagnostic['timeout_seconds']} s). This agent stops. "
+                                        "Check the provider's status page and the wire log.",
+                                        diagnostic={**exc.diagnostic, "timeouts_in_a_row": timeouts}) from None
+                            if action:
+                                action_required_since = action_required_since or monotonic()
+                                if monotonic() - action_required_since >= ACTION_REQUIRED_WAIT_SECONDS:
+                                    raise ProviderError(
+                                        f"{exc} Still refused after {ACTION_REQUIRED_WAIT_SECONDS // 60} minutes. "
+                                        "This agent stops.", diagnostic=exc.diagnostic) from None
+                            if _is_rate_limit(exc) or timeout or action:
+                                # Waiting for the provider pauses the run. Spread retries so ten agents
                                 # do not wake on the same second. In rounds the turn stays with this agent.
-                                timeout = _is_timeout(exc)
                                 delay = (30 if timeout else 60) + self.agents.index(agent) * 5
-                                reason = ("flex_unavailable" if exc.diagnostic.get("flex_unavailable") and not timeout
+                                reason = ("action_required" if action else
+                                          "flex_unavailable" if exc.diagnostic.get("flex_unavailable") and not timeout
                                           else "timeout" if timeout else "rate_limit")
                                 with self.changed:
                                     self.state["agent_status"][agent] = "rate_limited"

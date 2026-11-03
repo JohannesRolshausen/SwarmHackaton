@@ -170,6 +170,51 @@ class RoundsTests(RunHelper):
         self.assertEqual(reasons, ["rate_limit", "timeout", "rate_limit", "timeout", "rate_limit"])
         self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
 
+    def test_the_third_timeout_in_a_row_stops_the_agent(self):
+        timed_out = ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 380})
+        recorder = Recorder(fail={("seller-1", n): timed_out for n in range(1, 4)})
+        run = self.run_rounds(rounds_design(after_rounds=1), recorder)
+        self.assertEqual(sum(c[0] == "seller-1" for c in recorder.calls), 3)
+        error = next(e for e in run.state["events"] if e["kind"] == "error")
+        self.assertEqual(error["agent_id"], "agent_02")
+        self.assertIn("3 times in a row", error["message"])
+        self.assertNotIn("agent_02", [n["agent_id"] for n in run.state["notes"]])
+        self.assertEqual(run.state["finish_reason"], "action_ended")  # The others went on without that seller.
+        # Two timeouts, then an answer: the count starts again.
+        recorder = Recorder(fail={("seller-1", 1): timed_out, ("seller-1", 2): timed_out,
+                                  ("seller-1", 4): timed_out, ("seller-1", 5): timed_out})
+        run = self.run_rounds(rounds_design(after_rounds=2), recorder)
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "error"])
+        self.assert_rounds(run, 2)
+
+    def test_the_leader_timing_out_three_times_ends_the_run(self):
+        timed_out = ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 1080})
+        recorder = Recorder(fail={("buyer", n): timed_out for n in range(1, 4)})
+        run = self.run_rounds(rounds_design(after_rounds=1), recorder)
+        self.assertEqual({c[0] for c in recorder.calls}, {"buyer"})
+        self.assertEqual(run.state["status"], "error")
+
+    def test_no_credit_is_retried_for_a_while_then_stops(self):
+        refused = ProviderError("Provider refused the call: no credit left (credit_balance_exhausted).",
+                                diagnostic={"http_status": 429, "action_required": True})
+        # Credit added in time: the run goes on.
+        recorder = Recorder(fail={("seller-2", n): refused for n in range(1, 4)})
+        run = self.run_rounds(rounds_design(after_rounds=1), recorder)
+        self.assert_rounds(run, 1)
+        self.assertEqual([e["reason"] for e in run.state["events"] if e["kind"] == "retry_scheduled"],
+                         ["action_required"] * 3)
+        self.assertEqual(run.state["usage"]["agent_03"]["calls"], 1)
+        # Still refused after the window: the agent stops with the message.
+        with patch("swarm_bench.lab_engine.ACTION_REQUIRED_WAIT_SECONDS", 0.05):
+            recorder = Recorder(fail={("seller-2", n): refused for n in range(1, 1000)})
+            def slow(*args):
+                time.sleep(0.01)
+                return recorder(*args)
+            run = self.run_rounds(rounds_design(after_rounds=1), slow)
+        error = next(e for e in run.state["events"] if e["kind"] == "error")
+        self.assertEqual(error["agent_id"], "agent_03")
+        self.assertIn("This agent stops", error["message"])
+
     def test_an_agent_that_fails_for_good_passes_its_turn_on(self):
         broken = ProviderError("Provider returned HTTP 400.", diagnostic={"http_status": 400})
         recorder = Recorder(fail={("seller-2", 1): broken})
@@ -284,6 +329,7 @@ class FlexProviderTests(unittest.TestCase):
         request, timeout = self.sent.args[0], self.sent.kwargs["timeout"]
         self.assertEqual(json.loads(request.data)["service_tier"], "flex")
         self.assertEqual(timeout, FLEX_TIMEOUT_SECONDS)
+        self.assertEqual(FLEX_TIMEOUT_SECONDS, 18 * 60)
         self.assertEqual(usage["service_tier"], "flex")
         # Without Flex the timeout stays as before.
         self.request(reply, {**self.profile, "service_tier": ""})
