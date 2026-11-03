@@ -406,6 +406,27 @@ class ExperimentDesignTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
+    def test_export_names_the_leader_model_and_splits_its_tokens_from_the_others(self):
+        manager = LabManager(ROOT / "data", self.root / "lab", designs_dir=self.root / "designs")
+        models = {"agent_01": "decider", "agent_02": "persuader", "agent_03": "persuader"}
+        design = deal_design()
+        design["roles"][0]["forbidden_files"] = []  # No breach rule, as in the group-spending designs.
+        created = manager.create({"scenario": "designed", "design": design, "mode": "live", "models": models})
+        run = manager.runs[created["id"]]
+        run.record_usage("agent_01", {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 60,
+                                      "cache_creation_input_tokens": 30})
+        run.record_usage("agent_01", {"input_tokens": 50, "output_tokens": 5})
+        run.record_usage("agent_02", {"input_tokens": 200, "output_tokens": 20, "cost_usd": 0.01})
+        run.record_usage("agent_03", {"input_tokens": 300, "output_tokens": 30, "cost_usd": 0.02})
+        row = next(csv.DictReader(io.StringIO(manager.export_csv())))
+        # Without a breach rule no agent is "tested"; the leader column names the decision model.
+        self.assertEqual((row["tested_models"], row["peer_models"], row["leader_model"]), ("", "decider | persuader", "decider"))
+        self.assertEqual((row["leader_input_tokens"], row["leader_output_tokens"], row["leader_cache_read_tokens"],
+                          row["leader_cache_write_tokens"], row["leader_cost_usd"]), ("150", "15", "60", "30", ""))
+        self.assertEqual((row["others_input_tokens"], row["others_output_tokens"], row["others_cache_read_tokens"],
+                          row["others_cost_usd"]), ("500", "50", "", "0.03"))
+        self.assertEqual((row["input_tokens"], row["output_tokens"]), ("650", "65"))
+
 
 if __name__ == "__main__":
     unittest.main()

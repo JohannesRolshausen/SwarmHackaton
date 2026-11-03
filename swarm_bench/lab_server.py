@@ -46,6 +46,9 @@ def unique_experiment_title(title, existing_titles):
         n += 1
 
 
+AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd")
+
+
 def light_config(config):
     """A run's configuration for lists: a designed run keeps its design name and roles, not every text and file."""
     if config.get("scenario") != DESIGNED:
@@ -112,6 +115,9 @@ class LabManager:
                 "finish_reason": state.get("finish_reason"),
                 "usage": {key: sum(row.get(key) or 0 for row in usage)
                           for key in ("input_tokens", "output_tokens", "calls", "successful_calls", "failed_calls")},
+                # Per agent, so an export can split the leader's tokens from the others' (cost per model).
+                "agent_usage": {agent: {key: row[key] for key in AGENT_USAGE_KEYS if row.get(key) is not None}
+                                for agent, row in state.get("usage", {}).items()},
                 "series_id": self._series_of(state["id"]),
                 "favorite": state["id"] in self.favorites}
 
@@ -307,7 +313,21 @@ class LabManager:
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
                   "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
-                  "tested_models", "peer_models"]
+                  "tested_models", "peer_models", "leader_model"]
+        # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
+        split_keys = (("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
+                      ("cache_read_input_tokens", "cache_read_tokens"), ("cache_creation_input_tokens", "cache_write_tokens"),
+                      ("cost_usd", "cost_usd"))
+        fields += [f"{side}_{name}" for side in ("leader", "others") for _, name in split_keys]
+        def token_split(r):
+            leader, per_agent = r["config"].get("leader"), r.get("agent_usage") or {}
+            row = {}
+            for side, agents in (("leader", [a for a in per_agent if a == leader]),
+                                 ("others", [a for a in per_agent if a != leader])):
+                for key, name in split_keys:
+                    values = [per_agent[a][key] for a in agents if key in per_agent[a]]
+                    row[f"{side}_{name}"] = (round(sum(values), 6) if key == "cost_usd" else sum(values)) if values else ""
+            return row
         # One column per custom tool parameter, such as set_spending.amount, with the value of the tool's last call.
         def last_arguments(m):
             last = {}
@@ -352,6 +372,9 @@ class LabManager:
                              "design_name": (c.get("design") or {}).get("name", ""),
                              "custom_actions": " ".join(f"{e['agent_id']}:{e['tool']}" for e in m.get("custom_actions") or ()),
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
+                             "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))
+                             if c["leader"] else "",
+                             **token_split(r),
                              **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 
