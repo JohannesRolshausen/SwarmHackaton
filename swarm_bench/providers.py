@@ -24,8 +24,22 @@ class ProviderError(Exception):
 ACTION_REQUIRED_CODES = ("credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
                          "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "billing_hard_limit_reached")
 SERVICE_TIERS = ("", "auto", "default", "flex", "priority")
-# OpenAI's Flex guide raises the SDK timeout to 15 minutes. A little more, since a timeout cancels the response.
+GEMINI_HOST = "generativelanguage.googleapis.com"
+# Gemini's OpenAI layer takes service_tier like OpenAI. Without the field a call runs on the standard tier,
+# so only the documented values that change something are allowed.
+GEMINI_SERVICE_TIERS = ("", "flex", "priority")
+# OpenAI's Flex guide raises the SDK timeout to 15 minutes, Google's asks for 10 minutes or more and uses 15 in its
+# examples. A little more, since a timeout cancels the response.
 FLEX_TIMEOUT_SECONDS = 1080
+
+
+def service_tier_provider(profile):
+    """Who takes service_tier for this profile: "OpenAI" (Responses format), "Gemini" (its OpenAI layer) or None."""
+    if profile.get("kind") == "openai_responses":
+        return "OpenAI"
+    if profile.get("kind") == "openai_compatible" and urlparse(profile.get("base_url") or "").hostname == GEMINI_HOST:
+        return "Gemini"
+    return None
 
 
 def credit_too_low(raw):
@@ -196,8 +210,12 @@ class ProviderRegistry:
             raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
         if profile["service_tier"] not in SERVICE_TIERS:
             raise ValueError("Unknown service tier")
-        if profile["service_tier"] and profile["kind"] != "openai_responses":
-            raise ValueError("A service tier such as Flex is only sent with the OpenAI Responses format")
+        tier_provider = service_tier_provider(profile)
+        if profile["service_tier"] and not tier_provider:
+            raise ValueError("A service tier such as Flex is only sent with the OpenAI Responses format "
+                             "or to Gemini (generativelanguage.googleapis.com)")
+        if tier_provider == "Gemini" and profile["service_tier"] not in GEMINI_SERVICE_TIERS:
+            raise ValueError("Gemini takes only Flex or Priority as service tier. Leave it empty for standard")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -540,7 +558,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             payload["provider"] = {"max_price": {"prompt": 0.625, "completion": 3.125}}
         host = urlparse(profile["base_url"]).hostname
         effort = profile.get("reasoning_effort") or ""
-        if host == "generativelanguage.googleapis.com":
+        if host == GEMINI_HOST and profile.get("service_tier"):
+            # Top-level field, as with OpenAI. Gemini never upgrades a Flex call to standard by itself.
+            payload["service_tier"] = profile["service_tier"]
+        if host == GEMINI_HOST:
             # reasoning_effort and thinking_config overlap. Together, Gemini keeps the
             # effort and drops the thought summary. The level replaces the effort.
             if effort == "none":
@@ -567,13 +588,19 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     # Independent agents may queue behind one local GPU inference worker.
     # A remote thinking model sends nothing until its whole answer is ready, so the
     # wait grows with the output budget: 60 s of queueing plus 50 tokens per second.
-    flex = profile["kind"] == "openai_responses" and profile.get("service_tier") == "flex"
+    tier_provider = service_tier_provider(profile)
+    flex = tier_provider is not None and profile.get("service_tier") == "flex"
+    header_tier = None
     timeout = (600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1")
                else FLEX_TIMEOUT_SECONDS if flex else min(600, 60 + output_budget // 50))
     handlers = [NoRedirect()] + ([wire.tap(timeout, key)] if wire is not None else [])
     try:
         with build_opener(*handlers).open(request, timeout=timeout) as response:
             raw = response.read(4_000_001)
+            # Gemini names the tier that served the call in a response header, not in the body.
+            response_headers = getattr(response, "headers", None)
+            if tier_provider == "Gemini" and response_headers is not None:
+                header_tier = response_headers.get("x-gemini-service-tier")
             if wire is not None:
                 wire.received(response.status, response.reason, response.headers, raw)
             if len(raw) > 4_000_000:
@@ -597,8 +624,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
                                 "The run tries again every minute for 30 minutes, then stops. Add credit or raise the limit.",
                                 diagnostic={**diagnostic, "action_required": True}) from None
-        if exc.code == 429 and flex:
-            raise ProviderError("OpenAI Flex has no capacity right now (HTTP 429, not charged). "
+        # OpenAI answers a Flex call without capacity with 429. Gemini uses 503 (at capacity) or 429.
+        if flex and (exc.code == 429 or tier_provider == "Gemini" and exc.code == 503):
+            charge = ", not charged" if tier_provider == "OpenAI" else ""
+            raise ProviderError(f"{tier_provider} Flex has no capacity right now (HTTP {exc.code}{charge}). "
                                 "The run waits and tries again, after two misses in a row with standard processing.",
                                 retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
@@ -663,9 +692,11 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         cost = usage.get("cost")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
             reported_usage["cost_usd"] = cost
-    # The tier that actually served the call. A Flex request can come back as default.
-    tier = data.get("service_tier") if profile["kind"] == "openai_responses" else None
-    if isinstance(tier, str) and re.fullmatch(r"[a-z_]{1,30}", tier):
+    # The tier that actually served the call. A Flex request can come back as default (OpenAI),
+    # a Priority request as standard (Gemini).
+    tier = header_tier if tier_provider == "Gemini" else data.get("service_tier") if tier_provider == "OpenAI" else None
+    tier = tier.strip().lower() if isinstance(tier, str) else None
+    if tier and re.fullmatch(r"[a-z_]{1,30}", tier):
         reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "service_tier": tier}
     check_provider_error(data, reported_usage)
     try:

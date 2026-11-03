@@ -334,7 +334,8 @@ class LabManager:
                 for key, name in split_keys:
                     values = [per_agent[a][key] for a in agents if key in per_agent[a]]
                     row[f"{side}_{name}"] = (round(sum(values), 6) if key == "cost_usd" else sum(values)) if values else ""
-            # Calls per service tier as OpenAI reported it, e.g. "default:1 flex:11". Empty for other providers.
+            # Calls per service tier as the provider reported it, e.g. "default:1 flex:11" (OpenAI) or
+            # "flex:11 standard:1" (Gemini). Empty for other providers.
             tiers = (per_agent.get(leader) or {}).get("service_tiers") or {}
             row["leader_service_tiers"] = " ".join(f"{k}:{v}" for k, v in sorted(tiers.items()))
             return row

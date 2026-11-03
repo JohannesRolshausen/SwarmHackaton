@@ -1,4 +1,4 @@
-"""Rounds (leader, then every other agent once in random order), the message-gap world clock, OpenAI Flex,
+"""Rounds (leader, then every other agent once in random order), the message-gap world clock, Flex of OpenAI and Gemini,
 and provider waits that pause a run instead of ending it. Fake providers only, no paid calls."""
 import csv
 import io
@@ -14,7 +14,8 @@ from urllib.error import HTTPError
 
 from swarm_bench.common import ROOT
 from swarm_bench.experiment_design import expand, validate_design
-from swarm_bench.lab_engine import LabRun, _is_rate_limit
+from swarm_bench.error_help import explain_wait
+from swarm_bench.lab_engine import LabRun, _is_rate_limit, _wait_reason
 from swarm_bench.lab_server import LabManager
 from swarm_bench.providers import FLEX_TIMEOUT_SECONDS, ProviderError, ProviderRegistry, completion
 
@@ -308,7 +309,10 @@ class ErrorReply:
 
 
 class Reply:
-    def __init__(self, data): self.data = data
+    def __init__(self, data, headers=None):
+        self.data = data
+        if headers is not None:
+            self.headers = headers
     def __enter__(self): return self
     def __exit__(self, *_): pass
     def read(self, _): return json.dumps(self.data).encode()
@@ -401,6 +405,85 @@ class FlexProviderTests(unittest.TestCase):
                     registry.save({**base, **change})
 
 
+class GeminiFlexProviderTests(unittest.TestCase):
+    """Gemini's OpenAI layer: service_tier as with OpenAI, 503 or 429 without capacity, tier in a header."""
+    profile = {"kind": "openai_compatible", "model": "gemini-4-argon", "reasoning_effort": "",
+               "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "service_tier": "flex"}
+    reply = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}}
+
+    def request(self, outcome, profile=None, headers=None):
+        with patch("swarm_bench.providers.build_opener") as opener:
+            if isinstance(outcome, ErrorReply):
+                opener.return_value.open.side_effect = outcome.raise_it
+            else:
+                opener.return_value.open.return_value = Reply(outcome, headers)
+            try:
+                return completion(profile or self.profile, "key", [{"role": "user", "content": "hi"}], [], 16000)
+            finally:
+                self.sent = opener.return_value.open.call_args
+
+    def test_flex_is_a_top_level_field_with_the_long_timeout_and_the_header_names_the_tier(self):
+        _, usage = self.request(self.reply, headers={"x-gemini-service-tier": "FLEX"})
+        body = json.loads(self.sent.args[0].data)
+        self.assertEqual(body["service_tier"], "flex")
+        self.assertTrue(self.sent.args[0].full_url.endswith("/chat/completions"))
+        self.assertEqual(self.sent.kwargs["timeout"], FLEX_TIMEOUT_SECONDS)
+        self.assertEqual(usage["service_tier"], "flex")
+        # Standard: no field, the usual timeout. A served tier is still kept when Gemini names one.
+        _, usage = self.request(self.reply, {**self.profile, "service_tier": ""}, headers={"x-gemini-service-tier": "standard"})
+        self.assertNotIn("service_tier", json.loads(self.sent.args[0].data))
+        self.assertEqual(self.sent.kwargs["timeout"], 380)
+        self.assertEqual(usage["service_tier"], "standard")
+        # Without the header nothing is guessed. The body field is OpenAI's, not Gemini's.
+        _, usage = self.request({**self.reply, "service_tier": "flex"})
+        self.assertNotIn("service_tier", usage)
+
+    def test_other_chat_completions_servers_get_no_tier(self):
+        self.request(self.reply, {**self.profile, "base_url": "https://openrouter.ai/api/v1"})
+        self.assertNotIn("service_tier", json.loads(self.sent.args[0].data))
+        self.assertEqual(self.sent.kwargs["timeout"], 380)
+
+    def test_503_and_429_under_flex_are_flex_waits_and_503_without_flex_a_server_error(self):
+        for status in (503, 429):
+            with self.subTest(status), self.assertRaises(ProviderError) as caught:
+                self.request(ErrorReply(status, status))
+            self.assertTrue(caught.exception.retryable)
+            self.assertTrue(caught.exception.diagnostic["flex_unavailable"])
+            self.assertEqual(_wait_reason(caught.exception), "flex_unavailable")
+            self.assertIn(f"Gemini Flex has no capacity right now (HTTP {status})", str(caught.exception))
+            self.assertNotIn("not charged", str(caught.exception))
+            title, what, _ = explain_wait("flex_unavailable", caught.exception.diagnostic, self.profile)
+            self.assertEqual(title, "Gemini Flex has no capacity")
+            self.assertIn(f"(HTTP {status})", what)
+        with self.assertRaises(ProviderError) as caught:
+            self.request(ErrorReply(503, 503), {**self.profile, "service_tier": ""})
+        self.assertNotIn("flex_unavailable", caught.exception.diagnostic)
+        self.assertEqual(_wait_reason(caught.exception), "server_error")
+
+    def test_a_flex_timeout_stays_a_timeout_that_switches_at_once(self):
+        with patch("swarm_bench.providers.build_opener") as opener:
+            opener.return_value.open.side_effect = TimeoutError()
+            with self.assertRaises(ProviderError) as caught:
+                completion(self.profile, "key", [{"role": "user", "content": "hi"}], [], 16000)
+        self.assertEqual(caught.exception.diagnostic["timeout_seconds"], FLEX_TIMEOUT_SECONDS)
+        self.assertTrue(caught.exception.diagnostic["flex_unavailable"])
+        self.assertEqual(_wait_reason(caught.exception), "timeout")
+
+    def test_profile_accepts_flex_and_priority_for_gemini_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            registry = ProviderRegistry(Path(folder) / "models.json")
+            base = {"id": "argon", "name": "Argon", "kind": "openai_compatible", "model": "gemini-4-argon",
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"}
+            for tier in ("flex", "priority", ""):
+                registry.save({**base, "service_tier": tier})
+            for tier in ("default", "auto"):
+                with self.subTest(tier), self.assertRaisesRegex(ValueError, "Gemini takes only Flex or Priority"):
+                    registry.save({**base, "service_tier": tier})
+            with self.assertRaisesRegex(ValueError, "only sent with the OpenAI Responses format or to Gemini"):
+                registry.save({**base, "base_url": "https://openrouter.ai/api/v1", "service_tier": "flex"})
+
+
 class FlexFallbackTests(RunHelper):
     def test_two_flex_misses_in_a_row_send_one_call_with_standard_processing(self):
         miss = ProviderError("Flex", retryable=True, diagnostic={"http_status": 429, "flex_unavailable": True})
@@ -414,6 +497,19 @@ class FlexFallbackTests(RunHelper):
         self.assertEqual(len(fallback), 1)
         self.assertEqual(run.state["usage"]["agent_01"]["calls"], 2)
         self.assertEqual(run.state["finish_reason"], "action_ended")
+
+    def test_gemini_falls_back_by_leaving_the_tier_out(self):
+        miss = ProviderError("Flex", retryable=True, diagnostic={"http_status": 503, "flex_unavailable": True})
+        recorder = Recorder(fail={("buyer", 1): miss, ("buyer", 2): miss})
+        profiles = {"agent_01": {"kind": "openai_compatible", "service_tier": "flex",
+                                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"},
+                    **{a: {"kind": "fake"} for a in ("agent_02", "agent_03", "agent_04")}}
+        run = self.run_rounds(rounds_design(after_rounds=1), recorder, profiles=profiles)
+        tiers = [c[1]["service_tier"] for c in recorder.calls if c[0] == "buyer"]
+        self.assertEqual(tiers, ["flex", "flex", "", "flex"])
+        fallback = [e for e in run.state["events"] if e["kind"] == "service_tier_fallback"]
+        self.assertEqual([(e["requested"], e["used"]) for e in fallback], [("flex", "standard")])
+        self.assertEqual(run.state["usage"]["agent_01"]["calls"], 2)
 
 
 if __name__ == "__main__":

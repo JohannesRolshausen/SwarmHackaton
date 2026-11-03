@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from .lab_engine import ACTION_REQUIRED_WAIT_SECONDS
+from .providers import service_tier_provider
 
 PROVIDER_HOSTS = (
     ("generativelanguage.googleapis.com", "Google"), ("aiplatform.googleapis.com", "Google"),
@@ -55,8 +56,11 @@ def explain_wait(reason, diagnostic, profile):
                 f"{p} answered with HTTP 429: too many requests or tokens per minute for this key.",
                 f"Nothing. If it keeps happening, raise the rate limit with {p} or give fewer agents this key.")
     if reason == "flex_unavailable":
-        return ("OpenAI Flex has no capacity",
-                "OpenAI has no Flex capacity free right now (HTTP 429, not charged). After the second miss in a row "
+        gemini = service_tier_provider(profile if isinstance(profile, dict) else {}) == "Gemini"
+        name = "Gemini" if gemini else "OpenAI"
+        detail = f"HTTP {status}" if gemini and isinstance(status, int) else "HTTP 429, not charged"
+        return (f"{name} Flex has no capacity",
+                f"{name} has no Flex capacity free right now ({detail}). After the second miss in a row "
                 "the next call uses standard processing.",
                 "Nothing.")
     if reason == "timeout":

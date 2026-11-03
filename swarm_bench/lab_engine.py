@@ -78,8 +78,10 @@ def _wait_reason(exc):
     diagnostic = getattr(exc, "diagnostic", None) or {}
     if _is_action_required(exc):
         return "action_required"
+    if diagnostic.get("flex_unavailable") and "http_status" in diagnostic:
+        return "flex_unavailable"  # OpenAI 429, Gemini 429 or 503. A Flex timeout stays a timeout.
     if _is_rate_limit(exc):
-        return "flex_unavailable" if diagnostic.get("flex_unavailable") else "rate_limit"
+        return "rate_limit"
     if _is_timeout(exc):
         return "timeout"
     if diagnostic.get("network_error") or diagnostic.get("invalid_json"):
@@ -1555,11 +1557,13 @@ class LabRun:
                 raise ValueError("Call limit reached for this agent")
             profile = copy.deepcopy(self.state["provider_profiles"][agent])
             if profile.get("service_tier") == "flex" and self.flex_misses[agent] >= 2:
-                # OpenAI's advice for Flex without capacity: retry with standard processing. Only this call;
-                # the next one tries Flex again. The model is the same, only price and wait differ.
-                profile["service_tier"] = "default"
+                # OpenAI's and Google's advice for Flex without capacity: retry with standard processing. Only this
+                # call; the next one tries Flex again. The model is the same, only price and wait differ.
+                # OpenAI calls the standard tier default. Gemini uses it when the field is left out.
+                standard = "default" if profile.get("kind") == "openai_responses" else ""
+                profile["service_tier"] = standard
                 self.flex_misses[agent] = 0
-                self.event("service_tier_fallback", agent, requested="flex", used="default")
+                self.event("service_tier_fallback", agent, requested="flex", used=standard or "standard")
             key = self._provider_keys[agent]
             self.deliver_pending_board_context(agent)
             messages = copy.deepcopy(self.histories[agent])

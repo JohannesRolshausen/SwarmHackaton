@@ -396,7 +396,7 @@ def event_line(event):
     elif kind == "retry_scheduled" and event.get("reason") == "action_required":
         text = who + f"waits {event.get('delay_seconds', 60)}s: no credit or a spend limit reached"
     elif kind == "retry_scheduled" and event.get("reason") == "flex_unavailable":
-        text = who + f"waits {event.get('delay_seconds', 60)}s: OpenAI Flex had no capacity"
+        text = who + f"waits {event.get('delay_seconds', 60)}s: Flex had no capacity"
     elif kind == "round_order":
         text = f"Round {event.get('round')}: the others speak in the order " + ", ".join(
             agent_label(a) for a in event.get("order") or [])
