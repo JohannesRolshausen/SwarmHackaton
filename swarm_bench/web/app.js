@@ -37,10 +37,10 @@ function initTheme() {
 const agentName = a => "Agent " + a.split("_")[1];
 const fmtTokens = n => typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("en-US") : "—";
 const ids = n => Array.from({length:n},(_, i)=>`agent_${String(i+1).padStart(2,"0")}`);
-function toast(message, error=false) { $("toast").textContent=message; $("toast").className=error?"error":""; $("toast").hidden=false; clearTimeout(toast.timer); toast.timer=setTimeout(()=>$("toast").hidden=true,5000); }
+function toast(message, error=false) { $("toast").textContent=message; $("toast").className=error?"error":""; $("toast").hidden=false; clearTimeout(toast.timer); toast.timer=setTimeout(()=>$("toast").hidden=true,error?10000:5000); }
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  const data = await response.json(); if(!response.ok) throw new Error(data.error || "Request failed"); return data;
+  const data = await response.json(); if(!response.ok) throw new Error((data.error || "Request failed")+(data.help?" "+data.help:"")); return data;
 }
 function config() {
   if(isDesigned($("scenario").value)){
@@ -444,57 +444,27 @@ function renderAgentTokens(){
   const failed=usage.failed_calls?` · ${usage.failed_calls} failed`:"";
   line.textContent=`Output ${fmtTokens(usage.output_tokens)} · input ${fmtTokens(usage.input_tokens)} · reasoning ${fmtTokens(usage.reasoning_tokens||0)} · ${usage.calls} call${usage.calls===1?"":"s"}${failed}`;
 }
-// The error box sorts problems by severity. Orange: a provider wait, the run goes on by itself.
-// Red: the run or an agent cannot go on without the operator (wrong key, unknown model, no credit, budget used up).
-const waitReasons={rate_limit:"after a rate limit",flex_unavailable:"because OpenAI Flex has no capacity (not charged)",timeout:"after a timeout",network:"after a network error",server_error:"after a server error"};
-function fixHint(e){
-  const s=e?.diagnostic?.http_status;
-  return s===401||s===403?" Check the API key in Models.":s===404?" Check the model name in Models.":s===402?" Add credit with the provider.":"";
+// Error banner: each problem of the run with what happened, whether the run goes on by itself and what to do.
+// The server derives the issues from the run (swarm_bench/error_help.py); here only the time is filled in.
+// Orange (warning): the run goes on by itself. Red (error): the operator has to act.
+function inAbout(seconds){if(seconds<=5)return "now";if(seconds<55)return `in about ${Math.max(5,Math.round(seconds/5)*5)} seconds`;const m=Math.round(seconds/60);return `in about ${m} minute${m===1?"":"s"}`;}
+function issueTiming(el){
+  const left=(Date.parse(el.dataset.until)-Date.now())/1000;
+  if(el.dataset.timing==="resume")return left<=5?"The run is trying again now.":`The run waits and continues ${inAbout(left)}.`;
+  const at=new Date(el.dataset.until).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
+  return left<=5?"The 30 minutes are over: if the next try is refused too, this agent stops.":`It keeps trying every minute. If the call is still refused at ${at} (${inAbout(left)}), this agent stops.`;
 }
-function runAlerts(spent,busy){
-  const run=currentRun,fatal=[],wait=[];
-  if(!run)return{fatal,wait};
-  const events=run.events||[],status=run.agent_status||{};
-  const last=(a,kind)=>{for(let i=events.length-1;i>=0;i--){const e=events[i];if(e.agent_id===a&&e.kind===kind)return e;}return null;};
-  const sentence=t=>/[.!?…]$/.test(t)?t:t+".";
-  const clock=ms=>new Date(ms).toLocaleTimeString("en-US");
-  const provider=m=>m?.message?` (${m.message.length>220?m.message.slice(0,220)+"…":m.message})`:"";
-  const failed=Object.keys(status).filter(a=>status[a]==="error");
-  for(const a of failed){
-    const e=last(a,"error"),m=last(a,"model_error"),message=e?.message||run.error||"Provider error";
-    fatal.push(`${who(a)} stopped: ${sentence(message)}${m?.message&&message.startsWith(m.message)?fixHint(m):""}`);
-  }
-  if(run.error&&!failed.length)fatal.push(run.error);
-  if(busy)for(const a of Object.keys(status)){
-    if(status[a]!=="rate_limited")continue;
-    const e=last(a,"retry_scheduled"),m=last(a,"model_error");
-    if(!e)continue;
-    if(e.reason==="action_required"){
-      // The agent stops 30 minutes after the first refusal of this streak.
-      let first=e;
-      for(let i=events.length-1;i>=0;i--){const x=events[i];
-        if(x.kind==="started")break;
-        if(x.agent_id!==a||x.kind==="model_error")continue;
-        if(x.kind==="retry_scheduled"&&x.reason==="action_required"){first=x;continue;}
-        break;}
-      fatal.push(`${who(a)} has no credit or reached a spend limit${provider(m)}. Add credit or raise the limit. The agent tries again every minute and stops at about ${clock(Date.parse(first.at)+30*60000)}.`);
-    }else{
-      wait.push(`${who(a)} waits ${e.delay_seconds??"a few"} s ${waitReasons[e.reason]||"after a provider error"}${provider(m)} and tries again at ${clock(Date.parse(e.at)+(e.delay_seconds||0)*1000)}. The run goes on by itself.`);
-    }
-  }
-  if(run.finish_reason==="token_limit"){
-    const b=run.token_budget||{};
-    fatal.push(`Token budget used up: ${fmtTokens(b.accounted)} of ${fmtTokens(b.limit)} output tokens. The run has stopped. Start a new run with a larger output token budget to go on.`);
-  }
-  if(spent)fatal.push("Call limit reached; the budget does not reset on resume.");
-  fatal.push(...(run.archive_warnings||[]));
-  return{fatal,wait};
-}
-function renderRunAlerts(spent,busy){
-  const {fatal,wait}=runAlerts(spent,busy),box=$("run-error");
-  const part=(cls,role,lines)=>lines.length?`<div class="error-box${cls}" role="${role}">${lines.map(l=>`<p>${esc(l)}</p>`).join("")}</div>`:"";
-  box.hidden=!fatal.length&&!wait.length;
-  box.innerHTML=part("","alert",fatal)+part(" wait","status",wait);
+function updateIssueTimes(){document.querySelectorAll("#run-issues [data-until]").forEach(el=>{el.textContent=issueTiming(el);});}
+function renderIssues(issues){
+  const box=$("run-issues");
+  box.hidden=!issues.length;
+  box.innerHTML=issues.map(i=>{
+    const names=(i.agents||[]).map(a=>esc(who(a))).join(", ");
+    const timing=i.kind==="wait"?(i.resume_at?`<span data-timing="resume" data-until="${esc(i.resume_at)}"></span>`:"The run waits and tries again by itself.")+(i.gives_up_at?` <span data-timing="give-up" data-until="${esc(i.gives_up_at)}"></span>`:""):`It does not go on by itself.${i.consequence?" "+esc(i.consequence):""}`;
+    const tag=i.kind==="wait"&&i.severity!=="error"?"Continues by itself":"Action needed";
+    return `<div class="issue ${esc(i.severity)}" role="${i.severity==="error"?"alert":"status"}"><div class="issue-head"><span class="issue-tag">${tag}</span><strong>${esc(i.title)}</strong>${names?`<span class="issue-agents">${names}</span>`:""}</div><p>${esc(i.what)} ${timing}</p>${i.todo?`<p class="issue-todo"><b>What to do:</b> ${esc(i.todo)}</p>`:""}${i.original?`<p class="issue-original">Original message: <code>${esc(i.original)}</code></p>`:""}</div>`;
+  }).join("");
+  updateIssueTimes();
 }
 function renderRun() {
   renderArc();
@@ -518,7 +488,10 @@ function renderRun() {
   renderSeriesBar();
   $("method-note").textContent=c.retain_after_submit?"The board is read voluntarily. An agent stays available after submit; a new note can wake them. Ends when all have submitted or at the group limit.":c.scenario==="communication"?"The board is read voluntarily; each agent finishes after their answer.":"Logs keep exchanges and actions. Exposure alone does not prove a causal effect.";
   $("play").textContent=busy?"▶ Running":currentRun?.events.length?"▶ Resume":"▶ Start";
-  renderRunAlerts(spent,busy);
+  const issues=currentRun?.issues||[],explained=issues.some(i=>i.kind!=="wait");
+  renderIssues(issues);
+  const runError=[explained?"":currentRun?.error,...(currentRun?.archive_warnings||[]),spent?"Call limit reached; the budget does not reset on resume.":""].filter(Boolean).join(" ");
+  $("run-error").hidden=!runError;$("run-error").textContent=runError;
   $("metric-restricted").innerHTML=`${c.restricted.length}<span>/ ${c.agent_count}</span>`;
   // Segment disclose: opening the report is nearly always a breach, so the card shows passed-on figures instead.
   const discloseRun=c.scenario==="segment_disclose";
@@ -1040,7 +1013,7 @@ function renderSeriesBar(){
   const position=pkg.run_ids.indexOf(currentRun.id)+1;
   const canContinue=!pkg.worker_active&&pkg.status!=="complete";
   box.hidden=false;
-  box.innerHTML=`<span class="series-tag">PACKAGE</span><strong>${esc(pkg.title)}</strong><span>Run ${position} of ${pkg.repetitions} · ${pkg.finished_count}/${pkg.repetitions} finished · ${esc(seriesLabels[pkg.status]||pkg.status)}${pkg.worker_active&&followSeries===pkg.id?" · following the active run":""}</span><span class="series-actions">${pkg.worker_active?`<button type="button" class="button small danger-outline" data-series-action="stop" data-series-id="${esc(pkg.id)}">Stop package</button>`:""}${canContinue?`<button type="button" class="button small" data-series-action="continue" data-series-id="${esc(pkg.id)}">Continue package</button>`:""}<button type="button" class="button small" data-series-open="${esc(pkg.id)}">Compare runs</button></span>${pkg.error?`<p class="series-error">${esc(pkg.error)}</p>`:""}`;
+  box.innerHTML=`<span class="series-tag">PACKAGE</span><strong>${esc(pkg.title)}</strong><span>Run ${position} of ${pkg.repetitions} · ${pkg.finished_count}/${pkg.repetitions} finished · ${esc(seriesLabels[pkg.status]||pkg.status)}${pkg.worker_active&&followSeries===pkg.id?" · following the active run":""}</span><span class="series-actions">${pkg.worker_active?`<button type="button" class="button small danger-outline" data-series-action="stop" data-series-id="${esc(pkg.id)}">Stop package</button>`:""}${canContinue?`<button type="button" class="button small" data-series-action="continue" data-series-id="${esc(pkg.id)}">Continue package</button>`:""}<button type="button" class="button small" data-series-open="${esc(pkg.id)}">Compare runs</button></span>${pkg.error?`<p class="series-error">${esc(pkg.error)}${pkg.error_help?`<span class="series-error-help">${esc(pkg.error_help)}</span>`:""}</p>`:""}`;
 }
 async function startSeries(){
   if(!currentRun)return;
@@ -1072,7 +1045,7 @@ async function pollSeries(){
     const pkg=data.series.find(s=>s.id===followSeries);
     if(!pkg){followSeries=null;return;}
     if(pkg.active_run&&pkg.active_run!==currentRun?.id){await refreshBootstrap();await selectRun(pkg.active_run);}
-    if(!pkg.worker_active){followSeries=null;await refreshBootstrap();if(pkg.status==="complete")toast(`Package complete: ${pkg.finished_count} runs.`);else if(pkg.error)toast(pkg.error,true);}
+    if(!pkg.worker_active){followSeries=null;await refreshBootstrap();if(pkg.status==="complete")toast(`Package complete: ${pkg.finished_count} runs.`);else if(pkg.error)toast(pkg.error+(pkg.error_help?" "+pkg.error_help:""),true);}
     renderSeriesBar();
   }catch(e){toast(e.message,true);}finally{seriesPollBusy=false;}
 }
@@ -1123,7 +1096,7 @@ function seriesCard(s){
     s.worker_active?"":`<button type="button" class="button small danger-outline" data-series-delete="${esc(s.id)}">Delete</button>`
   ].join("");
   const confirm=confirmSeriesDelete===s.id?`<div class="compare-confirm series-confirm"><p>Delete “${esc(s.title)}” and its ${s.run_ids.length} run${s.run_ids.length===1?"":"s"}? Their logs will be removed from this computer.</p><button type="button" class="button small danger-outline" data-series-delete-yes="${esc(s.id)}">Delete</button><button type="button" class="button small" data-series-delete-no>Cancel</button></div>`:"";
-  return `<article class="series-card" data-series-card="${esc(s.id)}"><div class="series-card-head"><div class="series-card-title"><strong>${esc(s.title)}</strong><div class="muted">${esc(scenarioName(c))} · ${c.agent_count} agents · ${c.restricted.length} restricted · seed ${c.seed} · <span class="type-pill ${c.mode}">${c.mode==="demo"?"DEMO":"LIVE"}</span></div></div><span class="badge ${s.status==="running"?"running":s.status==="error"?"error":""}">${esc(seriesLabels[s.status]||s.status)}</span><span class="series-count">${s.finished_count}/${s.repetitions} runs</span><div class="series-card-actions">${actions}</div></div><div class="token-bar series-progress" aria-hidden="true"><i style="width:${ratio}%"></i></div>${s.error?`<p class="series-error">${esc(s.error)}</p>`:""}${confirm}<div class="series-stats">${stats}</div><details class="series-detail" data-series-detail="${esc(s.id)}" ${openSeries.has(s.id)?"open":""}><summary>Runs and agents side by side</summary>${seriesDetail(s,runs)}</details></article>`;
+  return `<article class="series-card" data-series-card="${esc(s.id)}"><div class="series-card-head"><div class="series-card-title"><strong>${esc(s.title)}</strong><div class="muted">${esc(scenarioName(c))} · ${c.agent_count} agents · ${c.restricted.length} restricted · seed ${c.seed} · <span class="type-pill ${c.mode}">${c.mode==="demo"?"DEMO":"LIVE"}</span></div></div><span class="badge ${s.status==="running"?"running":s.status==="error"?"error":""}">${esc(seriesLabels[s.status]||s.status)}</span><span class="series-count">${s.finished_count}/${s.repetitions} runs</span><div class="series-card-actions">${actions}</div></div><div class="token-bar series-progress" aria-hidden="true"><i style="width:${ratio}%"></i></div>${s.error?`<p class="series-error">${esc(s.error)}${s.error_help?`<span class="series-error-help">${esc(s.error_help)}</span>`:""}</p>`:""}${confirm}<div class="series-stats">${stats}</div><details class="series-detail" data-series-detail="${esc(s.id)}" ${openSeries.has(s.id)?"open":""}><summary>Runs and agents side by side</summary>${seriesDetail(s,runs)}</details></article>`;
 }
 function seriesDetail(s,runs){
   if(!runs.length)return '<p class="muted">No runs yet.</p>';
@@ -1260,6 +1233,7 @@ async function init(){
   });
   $("series-list").addEventListener("toggle",e=>{const d=e.target.closest?.("[data-series-detail]");if(!d)return;if(d.open)openSeries.add(d.dataset.seriesDetail);else openSeries.delete(d.dataset.seriesDetail);},true);
   setInterval(poll,800);
+  setInterval(updateIssueTimes,1000);
   setInterval(pollSeries,500);
   setInterval(()=>{if(activePage!=="compare"||!(bootstrap?.series||[]).some(s=>s.worker_active)||document.querySelector(".rename-form")||!$("compare-confirm").hidden)return;refreshBootstrap().catch(()=>{});},2500);
   const linkedRun=new URLSearchParams(location.search).get("run");if(linkedRun)await selectRun(linkedRun);

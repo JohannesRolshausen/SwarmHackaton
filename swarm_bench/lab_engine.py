@@ -68,7 +68,7 @@ def _is_action_required(exc):
     return bool((getattr(exc, "diagnostic", None) or {}).get("action_required"))
 
 
-SERVER_ERRORS = (408, 500, 502, 503, 504)
+SERVER_ERRORS = (408, 500, 502, 503, 504, 529)  # 529: Anthropic is overloaded.
 
 
 def _wait_reason(exc):
@@ -1852,7 +1852,9 @@ class LabRun:
                 self.end_turn(agent)
                 self.state["agent_status"][agent] = "error"
                 self.state["error"] = message
-                self.event("error", agent, message=message)
+                # The diagnostic and the profile let the interface explain the error next to the message.
+                self.event("error", agent, message=message, diagnostic=copy.deepcopy(getattr(exc, "diagnostic", None) or {}),
+                           provider=copy.deepcopy(self.state.get("provider_profiles", {}).get(agent)))
                 if (self.config["scenario"] == DESIGNED and self.config["design"]["rules"].get("stop_on_agent_error")
                         and self.state["status"] not in ("complete", "stopped")):
                     # Going on with one agent fewer would measure a different setup. End the run as a technical

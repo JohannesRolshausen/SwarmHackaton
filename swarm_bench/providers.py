@@ -79,7 +79,7 @@ def check_provider_error(data, usage=None):
                                 usage=usage, diagnostic={**response_diagnostic(data), "provider_error_code": code,
                                                          "action_required": True})
         raise ProviderError(f"Provider error in JSON (code {code or 'unspecified'}).",
-                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504),
+                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504, 529),
                             diagnostic={**response_diagnostic(data), "provider_error_code": code})
 
 
@@ -602,7 +602,7 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                                 "The run waits and tries again, after two misses in a row with standard processing.",
                                 retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
-                            retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic=diagnostic) from None
+                            retryable=exc.code in (408, 429, 500, 502, 503, 504, 529), diagnostic=diagnostic) from None
     except TimeoutError as exc:
         if wire is not None:
             wire.failed("timeout", exc)
@@ -636,6 +636,16 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     reported_usage[field] = value
                     reported_usage["input_tokens"] += value
+        elif profile["kind"] != "anthropic":
+            # OpenAI, Gemini and OpenRouter cache on their own and count the cached part
+            # inside the prompt tokens. Report it, without adding it to input_tokens again.
+            prompt_details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+            if isinstance(prompt_details, dict):
+                for source, field in (("cached_tokens", "cache_read_input_tokens"),
+                                      ("cache_write_tokens", "cache_creation_input_tokens")):
+                    value = prompt_details.get(source)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        reported_usage[field] = value
         details = usage.get("output_tokens_details", usage.get("completion_tokens_details"))
         reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) and reasoning_tokens >= 0:
