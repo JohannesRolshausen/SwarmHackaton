@@ -1530,6 +1530,9 @@ class LabRun:
             if usage.get("service_tier"):
                 tiers = totals.setdefault("service_tiers", {})
                 tiers[usage["service_tier"]] = tiers.get(usage["service_tier"], 0) + 1
+            if usage.get("served_provider"):
+                served = totals.setdefault("served_providers", {})
+                served[usage["served_provider"]] = served.get(usage["served_provider"], 0) + 1
 
     def record_failure(self, agent, decision, exc, usage=None):
         with self.lock:

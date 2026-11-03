@@ -49,7 +49,7 @@ def unique_experiment_title(title, existing_titles):
 
 
 AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd",
-                    "service_tiers")
+                    "service_tiers", "served_providers")
 
 
 def light_config(config):
@@ -321,7 +321,7 @@ class LabManager:
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
                   "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
                   "tested_models", "peer_models", "leader_model", "turn_order", "rounds_completed", "round_orders",
-                  "leader_notes", "leader_service_tiers"]
+                  "leader_notes", "leader_service_tiers", "leader_served_providers", "others_served_providers"]
         # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
         split_keys = (("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
                       ("cache_read_input_tokens", "cache_read_tokens"), ("cache_creation_input_tokens", "cache_write_tokens"),
@@ -350,6 +350,14 @@ class LabManager:
             # "flex:11 standard:1" (Gemini). Empty for other providers.
             tiers = (per_agent.get(leader) or {}).get("service_tiers") or {}
             row["leader_service_tiers"] = " ".join(f"{k}:{v}" for k, v in sorted(tiers.items()))
+            # Calls per provider behind OpenRouter, e.g. "DeepInfra:41". Empty for direct providers.
+            for side, agents in (("leader", [a for a in per_agent if a == leader]),
+                                 ("others", [a for a in per_agent if a != leader])):
+                served = {}
+                for agent in agents:
+                    for name, count in (per_agent[agent].get("served_providers") or {}).items():
+                        served[name] = served.get(name, 0) + count
+                row[f"{side}_served_providers"] = " ".join(f"{k}:{v}" for k, v in sorted(served.items()))
             return row
         def round_columns(r):
             m, c = r.get("metrics") or {}, r["config"]

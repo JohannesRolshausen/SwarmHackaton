@@ -153,6 +153,7 @@ const HELP = {
   "provider-model": {label: "Exact model ID", text: "The id the provider expects, copied exactly. A known model fills this in. If the list has no id for that endpoint, type it here. For Gemini that is a current id such as gemini-3.8-flash. The model has to accept tool calls in the format you selected."},
   "provider-token": {label: "Output budget parameter", text: "Name of the field that caps one reply. Many Chat Completions servers, including Gemini’s, want max_tokens. Some newer OpenAI models want max_completion_tokens. Responses always uses max_output_tokens, so this menu is locked there."},
   "provider-tier": {label: "Service tier", text: "Sent as service_tier with the OpenAI Responses format, and with OpenAI compatible when the base URL is Gemini’s (generativelanguage.googleapis.com). Other servers get no tier.\n\nFlex costs half, answers more slowly and sometimes has no capacity. OpenAI then answers HTTP 429 (not charged), Gemini HTTP 503 or 429. With Flex the lab waits up to 18 minutes for an answer. After a Flex timeout, or after the second Flex miss in a row, it sends that one call with standard processing and tries Flex again on the next call. Neither provider switches to standard by itself.\n\nGemini takes Flex or Priority. Empty means standard there, so Default and Auto are OpenAI only. Gemini 4 Argon has no free tier, so Flex needs a paid project. Allow Flex for the project in the OpenAI settings first.\n\nThe tier that served each call is stored (OpenAI in the response, Gemini in the x-gemini-service-tier header), and the CSV export counts it in leader_service_tiers."},
+  "provider-openrouter-provider": {label: "OpenRouter provider", text: "Only for OpenRouter. Most models there have several providers with different prices and quantizations, and without this field OpenRouter chooses per call.\n\nWith a slug such as deepinfra/fp8 the lab sends provider.order with that slug and allow_fallbacks false, so no other provider steps in. If that provider is down, the run waits like with any provider outage.\n\nThe provider that served each call is stored, and the CSV export counts it in leader_served_providers and others_served_providers."},
   "provider-reasoning": {label: "Reasoning", text: "How much thinking to request. Empty leaves the model’s default and still asks Gemini for a thought summary.\n\nOn Chat Completions the lab sends reasoning_effort, except for Gemini. Gemini receives thinking_level instead, with thought summaries turned on. Off sends reasoning_effort none and does not ask for the summary. Gemini 3 and Gemini 2.5 Pro always think, so Off is not available for them; Low asks for the least thinking. Very high and Maximum stay as those values on other servers; Gemini has no higher step, so both become high.\n\nOpenRouter receives reasoning.effort and is asked to include the reasoning text. OpenAI Responses is asked for a reasoning summary unless reasoning is Off. Gemini and OpenAI texts are summaries, not the raw chain of thought.\n\nAnthropic Messages receives output_config.effort with adaptive thinking and a summarized display. Off is not available there; Low asks for the least thinking. Empty leaves the model’s default: Claude Opus 5.5 and Sonnet 5.5 still think (Opus at medium, Sonnet at high) but return empty thinking text. Models before Claude 4.6, such as Haiku 4.5, reject adaptive thinking, so leave this empty for them.\n\nWhatever readable text comes back is shown on the agent’s Thinking tab and kept in the JSON log and both PDFs."},
   "provider-key-env": {label: "Key environment variable", text: "Name of an environment variable on the machine running the lab, for example GEMINI_API_KEY. Only the name is saved. Put the value in the environment, or in a gitignored .env file in the project folder. The lab reads it at startup and does not write it into profiles or exports."},
   "provider-key": {label: "API key", text: "Optional key kept only on this machine, in a local file that Git ignores. It is not written into the model profile, not shown again, and not included in exports. Leave the field empty to keep the saved key. If a gitignored .env file or the named environment variable already holds the key, leave this empty too. Saving a profile does not call the model."},
@@ -740,6 +741,14 @@ function syncServiceTierOptions(){
   for(const value of ["default","auto"])select.querySelector(`option[value="${value}"]`).disabled=provider==="Gemini";
   if(!provider||provider==="Gemini"&&["default","auto"].includes(select.value))select.value="";
 }
+function syncOpenRouterProvider(){
+  // Mirrors takes_openrouter_provider in providers.py.
+  let host="";
+  try{host=new URL($("provider-url").value.trim()).hostname;}catch(_){}
+  const field=$("provider-openrouter-provider"),takes=$("provider-kind").value==="openai_compatible"&&host==="openrouter.ai";
+  field.disabled=!takes;
+  if(!takes)field.value="";
+}
 function syncProviderKind(){
   const kind=$("provider-kind").value;
   const responses=kind==="openai_responses";
@@ -748,6 +757,7 @@ function syncProviderKind(){
   else if($("provider-token-param").value==="max_output_tokens")$("provider-token-param").value="max_tokens";
   syncReasoningOptions();
   syncServiceTierOptions();
+  syncOpenRouterProvider();
 }
 function syncReasoningOptions(){
   // Google: Gemini 2.5 Pro and Gemini 3 models always think. Off would not switch anything off.
@@ -795,7 +805,7 @@ function applyPreset(preset){
   $("provider-model").value=preset.model;
   $("provider-key-env").value=preset.key_env;
   $("provider-token-param").value=preset.token_parameter;
-  $("provider-reasoning").value=preset.reasoning_effort;$("provider-service-tier").value=preset.service_tier||"";
+  $("provider-reasoning").value=preset.reasoning_effort;$("provider-service-tier").value=preset.service_tier||"";$("provider-openrouter-provider").value=preset.openrouter_provider||"";
   syncProviderKind();
   $("provider-search").value=preset.label;
   closeModelPicker();
@@ -807,7 +817,7 @@ function renderProviders(){
 }
 function editProvider(profile={}){
   $("provider-id").value=profile.id||"";$("provider-name").value=profile.name||"";$("provider-kind").value=profile.kind||"openai_compatible";
-  $("provider-url").value=profile.base_url||"";$("provider-model").value=profile.model||"";$("provider-key-env").value=profile.key_env||"";$("provider-token-param").value=profile.token_parameter||"max_tokens";$("provider-reasoning").value=profile.reasoning_effort||"";$("provider-service-tier").value=profile.service_tier||"";
+  $("provider-url").value=profile.base_url||"";$("provider-model").value=profile.model||"";$("provider-key-env").value=profile.key_env||"";$("provider-token-param").value=profile.token_parameter||"max_tokens";$("provider-reasoning").value=profile.reasoning_effort||"";$("provider-service-tier").value=profile.service_tier||"";$("provider-openrouter-provider").value=profile.openrouter_provider||"";
   syncProviderKind();
   const known=matchingPreset(profile);
   $("provider-search").value=known?known.label:"";
@@ -1186,7 +1196,7 @@ async function init(){
   $("import-config").addEventListener("click",()=>$("config-file").click());
   $("config-file").addEventListener("change",async()=>{try{const f=$("config-file").files[0];if(!f)return;if(f.size>2000000)throw new Error("Configuration limited to 2 MB");const data=JSON.parse(await f.text()),c=data.config||data;if(Array.isArray(data.roles)&&!data.scenario&&typeof labImportDesign==="function"){labImportDesign(data);showPage("lab");return;}await api("/api/preview",{...c,mode:"demo"});applyConfig(c);toast("Configuration imported. No run started.");}catch(e){toast(e.message,true);}finally{$("config-file").value="";}});
   $("provider-kind").addEventListener("change",syncProviderKind);
-  $("provider-url").addEventListener("input",syncServiceTierOptions);
+  $("provider-url").addEventListener("input",()=>{syncServiceTierOptions();syncOpenRouterProvider();});
   $("provider-model").addEventListener("input",syncReasoningOptions);
   $("provider-search").addEventListener("focus",openModelPicker);
   $("provider-search").addEventListener("input",openModelPicker);
@@ -1199,7 +1209,7 @@ async function init(){
   $("provider-search-list").addEventListener("mousedown",e=>{const option=e.target.closest("[data-preset]");if(!option)return;e.preventDefault();applyPreset(MODEL_PRESETS[Number(option.dataset.preset)]);});
   document.addEventListener("pointerdown",e=>{if(!$("provider-picker").contains(e.target))closeModelPicker();});
   $("new-provider").addEventListener("click",()=>editProvider());$("provider-list").addEventListener("click",e=>{const el=e.target.closest("[data-provider]");if(el)editProvider(bootstrap.providers.find(p=>p.id===el.dataset.provider));});
-  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-reasoning").value,service_tier:serviceTierProvider()?$("provider-service-tier").value:"",api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
+  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-reasoning").value,service_tier:serviceTierProvider()?$("provider-service-tier").value:"",openrouter_provider:$("provider-openrouter-provider").value,api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
   $("compare-filter").addEventListener("change",()=>{hideDeleteConfirm();renderComparisons();});
   $("compare-all").addEventListener("change",()=>{const visible=visibleCompareRuns().map(r=>r.id);if($("compare-all").checked)visible.forEach(id=>compareSelected.add(id));else visible.forEach(id=>compareSelected.delete(id));renderComparisons();});
   $("compare-favorite").addEventListener("click",()=>markFavorites(true));
