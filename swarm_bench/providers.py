@@ -79,7 +79,7 @@ def check_provider_error(data, usage=None):
                                 usage=usage, diagnostic={**response_diagnostic(data), "provider_error_code": code,
                                                          "action_required": True})
         raise ProviderError(f"Provider error in JSON (code {code or 'unspecified'}).",
-                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504),
+                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504, 529),
                             diagnostic={**response_diagnostic(data), "provider_error_code": code})
 
 
@@ -602,7 +602,7 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                                 "The run waits and tries again, after two misses in a row with standard processing.",
                                 retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
-                            retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic=diagnostic) from None
+                            retryable=exc.code in (408, 429, 500, 502, 503, 504, 529), diagnostic=diagnostic) from None
     except TimeoutError as exc:
         if wire is not None:
             wire.failed("timeout", exc)

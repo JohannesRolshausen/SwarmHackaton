@@ -18,6 +18,7 @@ from .common import ROOT, read_json, write_json
 from .experiment_design import DESIGNS_DIR, DesignStore
 from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ALTRUISM_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, DESIGNED, LabRun, agent_text_defaults, assemble_prompt, is_segment
 from .lab_storage import atomic_json, load_run, save_run
+from .error_help import package_help, request_help, run_issues
 from .pdf_export import render_run_pdf
 from .providers import ProviderError, ProviderRegistry, load_local_env
 
@@ -176,9 +177,12 @@ class LabManager:
                 snapshot["worker_active"] = bool(self.workers.get(run_id) and self.workers[run_id].is_alive())
                 if snapshot["worker_active"] and snapshot["status"] == "paused":
                     snapshot["status"] = "running"
+                snapshot["issues"] = run_issues(snapshot)
                 return snapshot
             if run_id in self.archives:
-                return copy.deepcopy(self.archives[run_id])
+                snapshot = copy.deepcopy(self.archives[run_id])
+                snapshot["issues"] = run_issues(snapshot)
+                return snapshot
             raise ValueError("Unknown experiment")
 
     def inspect(self, run_id, agent):
@@ -589,7 +593,8 @@ class LabManager:
         statuses = [self._run_status(rid) for rid in record["run_ids"]]
         return {**{k: copy.deepcopy(v) for k, v in record.items() if k != "config"},
                 "config": copy.deepcopy(record["config"]), "worker_active": self._series_active(record["id"]),
-                "finished_count": sum(s in _FINISHED for s in statuses)}
+                "finished_count": sum(s in _FINISHED for s in statuses),
+                **({"error_help": package_help(record["error"])} if record.get("error") else {})}
 
     def series_list(self):
         with self.lock:
@@ -873,7 +878,8 @@ def make_lab_server(manager, port=8766):
                 else:
                     self.send(404, {"error": "Unknown route"})
             except (ValueError, TypeError, KeyError, ProviderError) as exc:
-                self.send(400, {"error": str(exc)})
+                hint = request_help(str(exc))
+                self.send(400, {"error": str(exc), **({"help": hint} if hint else {})})
             except OSError as exc:
                 if isinstance(exc, _CLIENT_DISCONNECTED) or getattr(exc, "winerror", None) == 10053:
                     return
