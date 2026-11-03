@@ -142,6 +142,12 @@ def explain_failure(message, diagnostic, profile, *, run_ends, resumable):
         return (f"Request too large for {p}",
                 f"{p} answered with HTTP 413: the conversation became longer than the model accepts.",
                 f"Choose a model with a longer context or lower call_limit. {after}")
+    if diagnostic.get("summary_verification"):
+        return ("OpenAI sends no reasoning summary to this organization",
+                "OpenAI answered with HTTP 400: reasoning summaries need a verified organization. Without them the "
+                "Thinking tab stays empty and the test words cannot be checked.",
+                "Verify the organization in the OpenAI settings (Organization, General). It can take a few minutes "
+                f"to take effect. {after}")
     if status in (400, 422):
         return (f"{p} rejected the request",
                 f"{p} answered with HTTP {status}: the request was invalid for this model. Usual causes are a setting "

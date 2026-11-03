@@ -69,6 +69,34 @@ Closing the browser does not stop a run; keep the machine awake and online. To c
 - The error banner above the run explains every problem next to its original message: what happened, whether the run goes on by itself (with the time of the next try, or for missing credit the time the agent stops), and what to do if not, e.g. "Rate limit at Google. The run waits and continues in about 1 minute." Agents waiting on the same cause share one line. The color shows the severity. Orange: an agent waits for the provider (rate limit, timeout, server or network error) and the run goes on by itself. Red: the run or an agent cannot go on without you (wrong API key, unknown model, no credit or a spend limit, token budget or call limit used up). The explanations come from `swarm_bench/error_help.py` and are derived from the stored events, so older runs get them too. Error answers of the server (for example a missing key at Start) carry a hint as well.
 - A profile with the OpenAI Responses format, or an OpenAI compatible profile with Gemini's base URL (`https://generativelanguage.googleapis.com/v1beta/openai`), can set a service tier. With Flex (`service_tier: flex`, half price, slower) the lab waits up to 18 minutes for an answer. OpenAI reports missing Flex capacity as HTTP 429 (not charged), Gemini as HTTP 503 or 429. After a Flex timeout, or after the second Flex miss in a row, the lab sends that one call with standard processing (event `service_tier_fallback`: `service_tier: default` for OpenAI, no tier for Gemini) and tries Flex again on the next call. Neither provider switches to standard by itself. Gemini accepts only `flex` and `priority`, since a call without the field runs on its standard tier. The tier that served each call (OpenAI: `service_tier` in the response, Gemini: the `x-gemini-service-tier` header) is stored and exported as `leader_service_tiers`. Gemini 4 Argon supports Flex but has no free tier.
 
+## Thinking of the models
+
+Without the models' thinking the test suspicion (`leader_test_terms`) can hardly be measured, so every provider of the plan is asked for readable thinking. It is stored with each reply (`reasoning_text`, and `reasoning_kind`: `summary` or `transcript`), shown on the agent's Thinking tab, and kept in the JSON log, the PDFs and the CSV column.
+
+| Model | Provider and format | What the lab sends | What comes back and is stored |
+|---|---|---|---|
+| GPT-6 Astra | OpenAI, Responses API | `reasoning: {summary: "auto"}` plus the effort if one is set, and `include: ["reasoning.encrypted_content"]` | the summary of each reasoning item (`summary_text`). The encrypted reasoning goes back with the next call, since runs use `store: false` |
+| Gemini 4 Argon, Gemini 3.8 Flash | Google, OpenAI layer (Chat Completions) | `extra_body.google.thinking_config.include_thoughts: true`, and `thinking_level` when an effort is set (never together with `reasoning_effort`, which would drop the summary) | the thought summary, in whichever form Gemini uses: `<thought>` tags in the content, a content part marked as thought, or `reasoning_content`. The thought signatures of tool calls go back with the next call |
+| MiMo V2.6 Pro | OpenRouter (Chat Completions) | `reasoning: {effort, exclude: false}` | `reasoning` and `reasoning_details` (the full reasoning text). `reasoning_details` goes back with the next call |
+| Claude (for comparison) | Anthropic Messages | adaptive thinking with `display: "summarized"` and `output_config.effort` | the thinking blocks with their signatures |
+
+Things to know:
+
+- OpenRouter sends the reasoning field only when the profile has an effort. Without one MiMo may not think at all, so the MiMo preset uses Medium.
+- GPT-6 Astra and Gemini 3 or later (Gemini 3.8 Flash, Gemini 4 Argon) always think, so the profile refuses reasoning Off for them.
+- OpenAI returns reasoning summaries only to verified organizations. Otherwise it answers HTTP 400, and the error banner says to verify the organization.
+- The Models page offers presets for all four plan models.
+
+**Tests with fake answers** (`tests/test_thinking_providers.py`): one whole run per provider, with answers in the provider's own format (Gemini in all three forms). Each test checks that every request asks for the thinking, that every reply stores its text, that the provider's reasoning goes back with the next call, that the run read back from disk still has it, that `leader_test_terms` finds a test word in the leader's thinking, and that the Thinking tab shows every text (`renderThinking()` of `app.js`, run in Node; skipped without Node).
+
+**Smoke test with real calls**: one small real run per plan model (two agents, one round, about three calls, all on the same model):
+
+```sh
+python scripts/smoke_thinking.py
+```
+
+It uses the saved lab profile with the same model id, or the key from `OPENAI_API_KEY`, `GEMINI_API_KEY` and `OPENROUTER_API_KEY` (also from `.env`). Before any paid call it checks that the profile asks for thinking. Afterwards it reads the wire log (did every request ask for it), the saved run (how many replies per agent came with thinking text, with an excerpt) and the Thinking tab. `--only argon mimo` picks models, `--profile <id>` checks saved profiles instead of the plan, `--design designs/group-spending-baseline.json` runs a whole design. The runs are saved like any other run, so the Thinking tab can be opened in the lab. The exit code is 0 only when every model passed.
+
 ## Traces and credentials
 
 Each run is saved locally under `runs/` (gitignored): independent agent contexts, board messages with author and time, tool calls including rejected arguments, model usage, reasoning text if the provider returns it, and provider errors. The interface offers replays and JSON, CSV and PDF exports. Each run also writes `wire_log.md`, every provider HTTP request and response as sent and received, with API keys replaced by `[REDACTED]`. Profiles, keys and raw traces are not committed.
@@ -96,4 +124,4 @@ The lab contains further experiment types and example configurations in `example
 python -m unittest discover -s tests -v
 ```
 
-The tests use fake providers and make no paid calls.
+The tests use fake providers and make no paid calls. The thinking of real providers is checked by `python scripts/smoke_thinking.py` (see Thinking of the models).

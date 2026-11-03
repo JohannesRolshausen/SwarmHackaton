@@ -114,8 +114,25 @@ def check_provider_error(data, usage=None):
 
 
 def thinking_always_on(model):
-    """Google: reasoning cannot be turned off for Gemini 2.5 Pro or Gemini 3 models."""
-    return re.match(r"(models/|google/)?gemini-(3|2\.5-pro)", model or "") is not None
+    """Models whose reasoning cannot be turned off. Google: Gemini 2.5 Pro and Gemini 3 or later, such as
+    Gemini 3.8 Flash and Gemini 4 Argon. OpenAI: GPT-6 Astra answers reasoning effort none with HTTP 400."""
+    model = model or ""
+    return (re.match(r"(models/|google/)?gemini-([3-9]|2\.5-pro)", model) is not None
+            or re.match(r"(openai/)?gpt-6-astra", model) is not None)
+
+
+def summary_needs_verification(raw):
+    """OpenAI answers a reasoning summary request of an unverified organization with HTTP 400 and says so in
+    the message. A 400 that only names reasoning.summary can also mean the model has no summaries, so the
+    verification must be named. Only a flag is kept, never the message."""
+    try:
+        error = json.loads(raw).get("error")
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+        return False
+    message = error["message"].lower()
+    return "verif" in message and ("summar" in message or error.get("param") == "reasoning.summary")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -223,7 +240,8 @@ class ProviderRegistry:
         if profile["kind"] == "anthropic" and profile["reasoning_effort"] == "none":
             raise ValueError("Anthropic Messages has no Off setting here. Choose Low for the least thinking")
         if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
-            raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
+            raise ValueError("This model cannot turn thinking off (Gemini 3 and later, Gemini 2.5 Pro, GPT-6 Astra). "
+                             "Choose Low, Medium or High")
         if profile["service_tier"] not in SERVICE_TIERS:
             raise ValueError("Unknown service tier")
         tier_provider = service_tier_provider(profile)
@@ -560,9 +578,12 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                    "tools": [{"type": "function", **copy.deepcopy(t["function"])} for t in tools]}
         if profile.get("reasoning_effort"):
             payload["reasoning"] = {"effort": profile["reasoning_effort"]}
-        # Summary is the readable text OpenAI will return. Raw reasoning stays encrypted.
+        # Summary is the readable text OpenAI will return. Raw reasoning stays encrypted. With store false
+        # the encrypted reasoning is the only way to hand it back with the next call; OpenAI now sends it
+        # by default in stateless mode and still accepts the include value, which older versions needed.
         if profile.get("reasoning_effort") != "none":
             payload.setdefault("reasoning", {})["summary"] = "auto"
+            payload["include"] = ["reasoning.encrypted_content"]
         if profile.get("service_tier"):
             payload["service_tier"] = profile["service_tier"]
         headers = {"Authorization": "Bearer " + key} if key else {}
@@ -640,6 +661,11 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
                                 "The run tries again every minute for 30 minutes, then stops. Add credit or raise the limit.",
                                 diagnostic={**diagnostic, "action_required": True}) from None
+        if (exc.code == 400 and profile["kind"] == "openai_responses" and (payload.get("reasoning") or {}).get("summary")
+                and summary_needs_verification(raw_error)):
+            raise ProviderError("OpenAI refused the reasoning summary (HTTP 400): it returns summaries only to verified "
+                                "organizations. Verify the organization in the OpenAI settings, then start a new run.",
+                                diagnostic={**diagnostic, "summary_verification": True}) from None
         # OpenAI answers a Flex call without capacity with 429. Gemini uses 503 (at capacity) or 429.
         if flex and (exc.code == 429 or tier_provider == "Gemini" and exc.code == 503):
             charge = ", not charged" if tier_provider == "OpenAI" else ""
