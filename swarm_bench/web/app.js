@@ -444,6 +444,58 @@ function renderAgentTokens(){
   const failed=usage.failed_calls?` · ${usage.failed_calls} failed`:"";
   line.textContent=`Output ${fmtTokens(usage.output_tokens)} · input ${fmtTokens(usage.input_tokens)} · reasoning ${fmtTokens(usage.reasoning_tokens||0)} · ${usage.calls} call${usage.calls===1?"":"s"}${failed}`;
 }
+// The error box sorts problems by severity. Orange: a provider wait, the run goes on by itself.
+// Red: the run or an agent cannot go on without the operator (wrong key, unknown model, no credit, budget used up).
+const waitReasons={rate_limit:"after a rate limit",flex_unavailable:"because OpenAI Flex has no capacity (not charged)",timeout:"after a timeout",network:"after a network error",server_error:"after a server error"};
+function fixHint(e){
+  const s=e?.diagnostic?.http_status;
+  return s===401||s===403?" Check the API key in Models.":s===404?" Check the model name in Models.":s===402?" Add credit with the provider.":"";
+}
+function runAlerts(spent,busy){
+  const run=currentRun,fatal=[],wait=[];
+  if(!run)return{fatal,wait};
+  const events=run.events||[],status=run.agent_status||{};
+  const last=(a,kind)=>{for(let i=events.length-1;i>=0;i--){const e=events[i];if(e.agent_id===a&&e.kind===kind)return e;}return null;};
+  const sentence=t=>/[.!?…]$/.test(t)?t:t+".";
+  const clock=ms=>new Date(ms).toLocaleTimeString("en-US");
+  const provider=m=>m?.message?` (${m.message.length>220?m.message.slice(0,220)+"…":m.message})`:"";
+  const failed=Object.keys(status).filter(a=>status[a]==="error");
+  for(const a of failed){
+    const e=last(a,"error"),m=last(a,"model_error"),message=e?.message||run.error||"Provider error";
+    fatal.push(`${who(a)} stopped: ${sentence(message)}${m?.message&&message.startsWith(m.message)?fixHint(m):""}`);
+  }
+  if(run.error&&!failed.length)fatal.push(run.error);
+  if(busy)for(const a of Object.keys(status)){
+    if(status[a]!=="rate_limited")continue;
+    const e=last(a,"retry_scheduled"),m=last(a,"model_error");
+    if(!e)continue;
+    if(e.reason==="action_required"){
+      // The agent stops 30 minutes after the first refusal of this streak.
+      let first=e;
+      for(let i=events.length-1;i>=0;i--){const x=events[i];
+        if(x.kind==="started")break;
+        if(x.agent_id!==a||x.kind==="model_error")continue;
+        if(x.kind==="retry_scheduled"&&x.reason==="action_required"){first=x;continue;}
+        break;}
+      fatal.push(`${who(a)} has no credit or reached a spend limit${provider(m)}. Add credit or raise the limit. The agent tries again every minute and stops at about ${clock(Date.parse(first.at)+30*60000)}.`);
+    }else{
+      wait.push(`${who(a)} waits ${e.delay_seconds??"a few"} s ${waitReasons[e.reason]||"after a provider error"}${provider(m)} and tries again at ${clock(Date.parse(e.at)+(e.delay_seconds||0)*1000)}. The run goes on by itself.`);
+    }
+  }
+  if(run.finish_reason==="token_limit"){
+    const b=run.token_budget||{};
+    fatal.push(`Token budget used up: ${fmtTokens(b.accounted)} of ${fmtTokens(b.limit)} output tokens. The run has stopped. Start a new run with a larger output token budget to go on.`);
+  }
+  if(spent)fatal.push("Call limit reached; the budget does not reset on resume.");
+  fatal.push(...(run.archive_warnings||[]));
+  return{fatal,wait};
+}
+function renderRunAlerts(spent,busy){
+  const {fatal,wait}=runAlerts(spent,busy),box=$("run-error");
+  const part=(cls,role,lines)=>lines.length?`<div class="error-box${cls}" role="${role}">${lines.map(l=>`<p>${esc(l)}</p>`).join("")}</div>`:"";
+  box.hidden=!fatal.length&&!wait.length;
+  box.innerHTML=part("","alert",fatal)+part(" wait","status",wait);
+}
 function renderRun() {
   renderArc();
   const tb=currentRun?.token_budget;
@@ -466,8 +518,7 @@ function renderRun() {
   renderSeriesBar();
   $("method-note").textContent=c.retain_after_submit?"The board is read voluntarily. An agent stays available after submit; a new note can wake them. Ends when all have submitted or at the group limit.":c.scenario==="communication"?"The board is read voluntarily; each agent finishes after their answer.":"Logs keep exchanges and actions. Exposure alone does not prove a causal effect.";
   $("play").textContent=busy?"▶ Running":currentRun?.events.length?"▶ Resume":"▶ Start";
-  const runError=[currentRun?.error,...(currentRun?.archive_warnings||[]),spent?"Call limit reached; the budget does not reset on resume.":""].filter(Boolean).join(" ");
-  $("run-error").hidden=!runError;$("run-error").textContent=runError;
+  renderRunAlerts(spent,busy);
   $("metric-restricted").innerHTML=`${c.restricted.length}<span>/ ${c.agent_count}</span>`;
   // Segment disclose: opening the report is nearly always a breach, so the card shows passed-on figures instead.
   const discloseRun=c.scenario==="segment_disclose";

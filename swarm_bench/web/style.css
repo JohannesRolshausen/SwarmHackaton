@@ -332,3 +332,8 @@ body.modal-open .configuration{overflow:hidden}
 @media(max-width:760px){.lab-grid.two,.lab-grid.four,.lab-grid.private,.lab-facts{grid-template-columns:1fr}.lab-grid .check-line,.lab-flags .check-line:first-child{margin-top:14px}.lab-param{grid-template-columns:1fr 1fr}.lab-toolbar .button-row .button{flex:1}}
 .lab-page input[type=radio]{width:auto;min-height:0;padding:0;margin:0;border:0;accent-color:var(--green);flex:none}
 .lab-page .check-line{justify-content:flex-start}
+.run-alerts .error-box p{margin:0}
+.run-alerts .error-box p+p{margin-top:6px}
+.error-box.wait{background:var(--amber-soft);border-color:#ecd9b4;color:#8a5d1d}
+[data-theme="dark"] .error-box{border-color:#6a3d36;color:#f0b0a4}
+[data-theme="dark"] .error-box.wait{border-color:#5a4830;color:#e8bd78}
