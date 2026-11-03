@@ -29,6 +29,7 @@ GEMINI_HOST = "generativelanguage.googleapis.com"
 # Gemini's OpenAI layer takes service_tier like OpenAI. Without the field a call runs on the standard tier,
 # so only the documented values that change something are allowed.
 GEMINI_SERVICE_TIERS = ("", "flex", "priority")
+OPENROUTER_HOST = "openrouter.ai"
 # OpenAI's Flex guide raises the SDK timeout to 15 minutes, Google's asks for 10 minutes or more and uses 15 in its
 # examples. A little more, since a timeout cancels the response.
 FLEX_TIMEOUT_SECONDS = 1080
@@ -41,6 +42,12 @@ def service_tier_provider(profile):
     if profile.get("kind") == "openai_compatible" and urlparse(profile.get("base_url") or "").hostname == GEMINI_HOST:
         return "Gemini"
     return None
+
+
+def takes_openrouter_provider(profile):
+    """Only OpenRouter routes between several providers of one model."""
+    return (profile.get("kind") == "openai_compatible"
+            and urlparse(profile.get("base_url") or "").hostname == OPENROUTER_HOST)
 
 
 def credit_too_low(raw):
@@ -225,6 +232,7 @@ class ProviderRegistry:
         if not isinstance(payload, dict):
             raise ValueError("Invalid profile")
         fields = {"id", "name", "kind", "base_url", "model", "key_env", "token_parameter", "reasoning_effort", "service_tier",
+                  "openrouter_provider",
                   "api_key", "clear_key"}
         if set(payload) - fields:
             raise ValueError("Unknown profile field")
@@ -250,6 +258,11 @@ class ProviderRegistry:
                              "or to Gemini (generativelanguage.googleapis.com)")
         if tier_provider == "Gemini" and profile["service_tier"] not in GEMINI_SERVICE_TIERS:
             raise ValueError("Gemini takes only Flex or Priority as service tier. Leave it empty for standard")
+        if profile["openrouter_provider"]:
+            if not takes_openrouter_provider(profile):
+                raise ValueError("A fixed provider only works with OpenRouter (openrouter.ai) in the OpenAI compatible format")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,59}(/[a-z0-9][a-z0-9._-]{0,59})?", profile["openrouter_provider"]):
+                raise ValueError("Invalid OpenRouter provider. Use a slug such as deepinfra or deepinfra/fp8")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -594,6 +607,9 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         if urlparse(profile["base_url"]).hostname == "openrouter.ai" and profile["model"] == "nvidia/nemotron-3-ultra-550b-a55b":
             payload["provider"] = {"max_price": {"prompt": 0.625, "completion": 3.125}}
         host = urlparse(profile["base_url"]).hostname
+        if host == OPENROUTER_HOST and profile.get("openrouter_provider"):
+            # No other provider may step in: the model should run on the same endpoint in every run.
+            payload.setdefault("provider", {}).update(order=[profile["openrouter_provider"]], allow_fallbacks=False)
         effort = profile.get("reasoning_effort") or ""
         if host == GEMINI_HOST and profile.get("service_tier"):
             # Top-level field, as with OpenAI. Gemini never upgrades a Flex call to standard by itself.
@@ -748,6 +764,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     tier = tier.strip().lower() if isinstance(tier, str) else None
     if tier and re.fullmatch(r"[a-z_]{1,30}", tier):
         reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "service_tier": tier}
+    # OpenRouter names the provider that served the call in the body.
+    served = data.get("provider") if urlparse(profile["base_url"]).hostname == OPENROUTER_HOST else None
+    if isinstance(served, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}", served):
+        reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "served_provider": served}
     check_provider_error(data, reported_usage)
     try:
         if (data.get("stop_reason") == "max_tokens" or

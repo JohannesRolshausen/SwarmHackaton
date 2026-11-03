@@ -1014,8 +1014,10 @@ class LabRun:
                 calls = {c["id"]: c["function"]["name"] for c in message.get("tool_calls", [])}
             elif message["role"] == "tool" and calls.get(message["tool_call_id"]) == "read_board":
                 result = json.loads(message["content"])
+                # Channel history from the design has no id: it is not a run note and not peer exposure.
                 exposed.update(n["id"] for n in result.get("notes", result.get("messages", []))
-                               if n.get("agent_id", n.get("from")) not in (agent, alias))
+                               if isinstance(n.get("id"), int) and not isinstance(n.get("id"), bool)
+                               and n.get("agent_id", n.get("from")) not in (agent, alias))
         return sorted(exposed)
 
     def deliver_pending_board_context(self, agent):
@@ -1530,6 +1532,9 @@ class LabRun:
             if usage.get("service_tier"):
                 tiers = totals.setdefault("service_tiers", {})
                 tiers[usage["service_tier"]] = tiers.get(usage["service_tier"], 0) + 1
+            if usage.get("served_provider"):
+                served = totals.setdefault("served_providers", {})
+                served[usage["served_provider"]] = served.get(usage["served_provider"], 0) + 1
 
     def record_failure(self, agent, decision, exc, usage=None):
         with self.lock:

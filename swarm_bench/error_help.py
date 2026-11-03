@@ -130,6 +130,13 @@ def explain_failure(message, diagnostic, profile, *, run_ends, resumable):
         return (f"{p} rejected the API key",
                 f"{p} answered with HTTP {status}: the key is wrong, expired or has no access to this model.",
                 f"Check the key of the profile {name} under Models (or its environment variable). {after}")
+    if status == 404 and (profile or {}).get("openrouter_provider"):
+        fixed = profile["openrouter_provider"]
+        return (f"Fixed provider {fixed} not available at {p}",
+                f"{p} answered with HTTP 404. The profile {name} allows only {fixed}, with no other provider to step in: "
+                "the slug may be wrong, this provider may not offer the model right now, or the account settings exclude it.",
+                f"Check the endpoints of {model or 'the model'} on OpenRouter and the field OpenRouter provider of the "
+                f"profile under Models. {after}")
     if status == 404:
         return (f"Model or address not found at {p}",
                 f"{p} answered with HTTP 404: the model{f' {model}' if model else ''} or the base URL does not exist "
