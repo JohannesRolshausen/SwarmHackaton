@@ -77,7 +77,7 @@ def _is_server_error(diagnostic):
 def _wait_reason(exc):
     """Why a provider error only pauses the agent, or None when it is not a wait.
 
-    A wait is retried without limit and never uses the call limit: it says nothing about the model."""
+    A wait is retried for up to WAIT_LIMIT_SECONDS and never uses the call limit: it says nothing about the model."""
     diagnostic = getattr(exc, "diagnostic", None) or {}
     if _is_action_required(exc):
         return "action_required"
@@ -96,7 +96,9 @@ def _wait_reason(exc):
 
 WAIT_SECONDS = {"action_required": 60, "rate_limit": 60, "flex_unavailable": 60, "timeout": 30, "network": 30,
                 "server_error": 60, "incomplete": 30}
-ACTION_REQUIRED_WAIT_SECONDS = 1800  # Time to add credit or raise a limit before the agent stops.
+# How long an agent waits out provider errors in a row before it stops. Long enough for a rate limit wave, an outage
+# or adding credit. Short enough that a package left running overnight goes on with its next run.
+WAIT_LIMIT_SECONDS = 1800
 
 
 # The turn order in rounds and the gaps between channel times come from the operating system's random source.
@@ -1754,7 +1756,7 @@ class LabRun:
 
     def agent_loop(self, agent):
         consecutive_failures = 0
-        action_required_since = None  # When the current run of no-credit or spend-limit errors began.
+        waiting_since = None  # When the current series of provider waits began. A successful call resets it.
         try:
             while not self.pause_requested.is_set():
                 with self.changed:
@@ -1812,18 +1814,19 @@ class LabRun:
                     else:
                         try:
                             self.continuing_tools[agent] = self.live_call(agent)
-                            consecutive_failures, action_required_since = 0, None
+                            consecutive_failures, waiting_since = 0, None
                             if not self.continuing_tools[agent] and self.state.get("rounds"):
                                 with self.changed:
                                     self.end_turn(agent)
                         except ProviderError as exc:
                             reason = _wait_reason(exc)
-                            if reason == "action_required":
-                                action_required_since = action_required_since or monotonic()
-                                if monotonic() - action_required_since >= ACTION_REQUIRED_WAIT_SECONDS:
+                            if reason:
+                                waiting_since = waiting_since or monotonic()
+                                if monotonic() - waiting_since >= WAIT_LIMIT_SECONDS:
+                                    still = "Still refused" if reason == "action_required" else "Still failing"
                                     raise ProviderError(
-                                        f"{exc} Still refused after {ACTION_REQUIRED_WAIT_SECONDS // 60} minutes. "
-                                        "This agent stops.", diagnostic=exc.diagnostic) from None
+                                        f"{exc} {still} after {WAIT_LIMIT_SECONDS // 60} minutes. This agent stops.",
+                                        diagnostic={**(exc.diagnostic or {}), "gave_up_after_wait": reason}) from None
                             if reason:
                                 # Waiting for the provider pauses the run. Spread retries so ten agents
                                 # do not wake on the same second. In rounds the turn stays with this agent.

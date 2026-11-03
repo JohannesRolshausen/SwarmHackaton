@@ -202,7 +202,7 @@ Everything else is optional.
 | `rules.idle_wait_seconds` | `2` | 0–60 |
 | `rules.stop_on_breach` | `false` | `true`, `false` |
 | `rules.turn_order` | `free` | `free`, `rounds` (needs a leading role with one agent and `idle_policy` `finish`) |
-| `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) never count as failing. |
+| `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) count as failing only after 30 minutes in a row without a successful answer. |
 | `run_defaults.call_limit` | `24` | 1–500 |
 | `run_defaults.max_output_tokens` | `16000` | 128–400,000 |
 | `run_defaults.total_output_tokens` | `1500000` | 128–1,000,000,000 |

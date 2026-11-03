@@ -452,7 +452,7 @@ function issueTiming(el){
   const left=(Date.parse(el.dataset.until)-Date.now())/1000;
   if(el.dataset.timing==="resume")return left<=5?"The run is trying again now.":`The run waits and continues ${inAbout(left)}.`;
   const at=new Date(el.dataset.until).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
-  return left<=5?"The 30 minutes are over: if the next try is refused too, this agent stops.":`It keeps trying every minute. If the call is still refused at ${at} (${inAbout(left)}), this agent stops.`;
+  return left<=5?"The 30 minutes are over: if the next try fails too, this agent stops.":`It keeps trying. If the call still fails at ${at} (${inAbout(left)}), this agent stops, so a package goes on with its next run.`;
 }
 function updateIssueTimes(){document.querySelectorAll("#run-issues [data-until]").forEach(el=>{el.textContent=issueTiming(el);});}
 function renderIssues(issues){

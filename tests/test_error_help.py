@@ -43,6 +43,22 @@ class ExplanationTests(unittest.TestCase):
         self.assertEqual(issue["original"], "Provider returned HTTP 429. Check the profile and limits.")
         self.assertEqual(datetime.fromisoformat(issue["resume_at"]) - datetime.fromisoformat(AT), timedelta(seconds=60))
 
+    def test_every_wait_names_when_the_agent_gives_up(self):
+        later = (datetime.fromisoformat(AT) + timedelta(minutes=4)).isoformat()
+        events = wait("agent_01", "rate_limit", {"http_status": 429}) + wait("agent_01", "server_error",
+                                                                             {"http_status": 503}, at=later)
+        issue = run_issues(state(events, agent_status={"agent_01": "rate_limited", "agent_02": "waiting"}))[0]
+        self.assertEqual(datetime.fromisoformat(issue["gives_up_at"]) - datetime.fromisoformat(AT), timedelta(minutes=30))
+        # A successful answer in between starts the window again.
+        events.insert(2, {"kind": "model_response", "agent_id": "agent_01", "at": AT})
+        issue = run_issues(state(events, agent_status={"agent_01": "rate_limited", "agent_02": "waiting"}))[0]
+        self.assertEqual(datetime.fromisoformat(issue["gives_up_at"]) - datetime.fromisoformat(AT), timedelta(minutes=34))
+        title, what, todo = explain_failure("Provider returned HTTP 503. Still failing after 30 minutes. This agent stops.",
+                                            {"http_status": 503, "gave_up_after_wait": "server_error"}, GOOGLE,
+                                            run_ends=True, resumable=False)
+        self.assertIn("Still failing", title)
+        self.assertIn("package can go on", what)
+
     def test_a_wait_is_shown_only_while_the_agent_waits(self):
         events = wait("agent_01", "rate_limit", {"http_status": 429})
         self.assertEqual(run_issues(state(events)), [])

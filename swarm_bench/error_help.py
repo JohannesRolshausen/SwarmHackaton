@@ -7,7 +7,7 @@ so runs saved before this module existed are explained too."""
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-from .lab_engine import ACTION_REQUIRED_WAIT_SECONDS
+from .lab_engine import WAIT_LIMIT_SECONDS
 
 PROVIDER_HOSTS = (
     ("generativelanguage.googleapis.com", "Google"), ("aiplatform.googleapis.com", "Google"),
@@ -114,9 +114,14 @@ def explain_failure(message, diagnostic, profile, *, run_ends, resumable):
              else "Then start a new run.")
     if diagnostic.get("action_required") or "Still refused after" in message:
         return (f"Still no credit at {p}",
-                f"{p} refused every call for {ACTION_REQUIRED_WAIT_SECONDS // 60} minutes: no credit left or a spend "
+                f"{p} refused every call for {WAIT_LIMIT_SECONDS // 60} minutes: no credit left or a spend "
                 "limit reached. The lab stopped trying.",
                 f"Add credit or raise the spend limit at {p}. {after}")
+    if diagnostic.get("gave_up_after_wait") or "Still failing after" in message:
+        return (f"Still failing at {p} after {WAIT_LIMIT_SECONDS // 60} minutes",
+                f"Every call to {p} failed for {WAIT_LIMIT_SECONDS // 60} minutes (rate limit, timeout, server or "
+                "network error, or an answer without a reply). The lab stopped trying, so the package can go on.",
+                f"Check the status page of {p} and the profile {name}. {after}")
     if status in (401, 403):
         return (f"{p} rejected the API key",
                 f"{p} answered with HTTP {status}: the key is wrong, expired or has no access to this model.",
@@ -219,15 +224,15 @@ def run_issues(state):
                          "reason": reason, "title": title, "what": what, "continues": True, "todo": todo,
                          "original": failure.get("message"), "resume_at": _later(wait.get("at"), delay),
                          "agents": [agent]}
-                if reason == "action_required":
-                    # The window starts at the first refusal since the agent's last successful answer.
-                    since = None
-                    for e in reversed(mine[:mine.index(wait) + 1]):
-                        if e.get("kind") == "model_response":
-                            break
-                        if e.get("kind") == "retry_scheduled" and e.get("reason") == "action_required":
-                            since = e
-                    issue["gives_up_at"] = _later((since or wait).get("at"), ACTION_REQUIRED_WAIT_SECONDS)
+                # Every wait ends after 30 minutes. The window starts at the first wait since the agent's last
+                # successful answer, like the timer of the run.
+                since = None
+                for e in reversed(mine[:mine.index(wait) + 1]):
+                    if e.get("kind") == "model_response":
+                        break
+                    if e.get("kind") == "retry_scheduled" and e.get("reason"):
+                        since = e
+                issue["gives_up_at"] = _later((since or wait).get("at"), WAIT_LIMIT_SECONDS)
                 issues.append(issue)
         error = next((e for e in reversed(mine) if e.get("kind") == "error"), None)
         if error and not any(e.get("kind") == "model_response" for e in mine[mine.index(error):]):

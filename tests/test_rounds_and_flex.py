@@ -211,7 +211,7 @@ class RoundsTests(RunHelper):
                          ["action_required"] * 3)
         self.assertEqual(run.state["usage"]["agent_03"]["calls"], 1)
         # Still refused after the window: the agent stops with the message.
-        with patch("swarm_bench.lab_engine.ACTION_REQUIRED_WAIT_SECONDS", 0.05):
+        with patch("swarm_bench.lab_engine.WAIT_LIMIT_SECONDS", 0.05):
             recorder = Recorder(fail={("seller-2", n): refused for n in range(1, 1000)})
             def slow(*args):
                 time.sleep(0.01)
@@ -221,6 +221,21 @@ class RoundsTests(RunHelper):
         self.assertEqual(error["agent_id"], "agent_03")
         self.assertIn("This agent stops", error["message"])
         self.assertEqual(run.state["finish_reason"], "agent_error")
+
+    def test_any_wait_stops_the_agent_after_the_limit_so_a_package_goes_on(self):
+        down = ProviderError("Provider returned HTTP 503.", retryable=True, diagnostic={"http_status": 503})
+        with patch("swarm_bench.lab_engine.WAIT_LIMIT_SECONDS", 0.05):
+            recorder = Recorder(fail={("seller-2", n): down for n in range(1, 1000)})
+            def slow(*args):
+                time.sleep(0.01)
+                return recorder(*args)
+            run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True), slow)
+        error = next(e for e in run.state["events"] if e["kind"] == "error")
+        self.assertEqual(error["agent_id"], "agent_03")
+        self.assertIn("Still failing after", error["message"])
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        reasons = {e["reason"] for e in run.state["events"] if e["kind"] == "retry_scheduled"}
+        self.assertEqual(reasons, {"server_error"})
 
     def test_an_agent_that_fails_for_good_passes_its_turn_on(self):
         broken = ProviderError("Provider returned HTTP 400.", diagnostic={"http_status": 400})
