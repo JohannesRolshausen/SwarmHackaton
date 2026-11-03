@@ -569,6 +569,39 @@ class ProviderTests(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();thread.join()
 
+    def test_cached_tokens_of_openai_gemini_and_openrouter_are_reported(self):
+        replies = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                data = json.dumps(replies.pop(0)).encode(); self.send_response(200); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}/v1"
+            chat = {"kind": "openai_compatible", "base_url": base, "model": "m"}
+            # Chat Completions (OpenAI, Gemini, OpenRouter): cached part inside prompt_tokens.
+            replies.append({"choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 1000, "completion_tokens": 5, "total_tokens": 1005,
+                                      "prompt_tokens_details": {"cached_tokens": 768, "cache_write_tokens": 200}}})
+            _, usage = completion(chat, "", [{"role": "user", "content": "task"}], [], 100)
+            self.assertEqual((usage["input_tokens"], usage["cache_read_input_tokens"], usage["cache_creation_input_tokens"]),
+                             (1000, 768, 200))
+            # Responses API: input_tokens_details.
+            replies.append({"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}],
+                            "usage": {"input_tokens": 2000, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 1536}}})
+            _, usage = completion({**chat, "kind": "openai_responses"}, "", [{"role": "user", "content": "task"}], [], 100)
+            self.assertEqual((usage["input_tokens"], usage["cache_read_input_tokens"]), (2000, 1536))
+            self.assertNotIn("cache_creation_input_tokens", usage)
+            # No details: no cache fields.
+            replies.append({"choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+            _, usage = completion(chat, "", [{"role": "user", "content": "task"}], [], 100)
+            self.assertNotIn("cache_read_input_tokens", usage)
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
     def test_anthropic_tool_result_grouping(self):
         messages = [{"role": "system", "content": "policy"}, {"role": "user", "content": "task"},
                     {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "function": {"name": "list_files", "arguments": "{}"}}, {"id": "b", "function": {"name": "read_file", "arguments": '{"path":"notes.json"}'}}]},
