@@ -18,6 +18,7 @@ from .common import ROOT, read_json, write_json
 from .experiment_design import DESIGNS_DIR, DesignStore
 from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ALTRUISM_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, DESIGNED, LabRun, agent_text_defaults, assemble_prompt, is_segment
 from .lab_storage import atomic_json, load_run, save_run
+from .leader_signals import COLUMNS as LEADER_SIGNAL_COLUMNS, leader_columns
 from .error_help import package_help, request_help, run_issues
 from .pdf_export import render_run_pdf
 from .providers import ProviderError, ProviderRegistry, load_local_env
@@ -326,6 +327,17 @@ class LabManager:
                       ("cache_read_input_tokens", "cache_read_tokens"), ("cache_creation_input_tokens", "cache_write_tokens"),
                       ("cost_usd", "cost_usd"))
         fields += [f"{side}_{name}" for side in ("leader", "others") for _, name in split_keys]
+        # Did the leader know the limit before the order, how far the talk had come, and test words in its text.
+        fields += list(LEADER_SIGNAL_COLUMNS)
+        def leader_signals(r):
+            with self.lock:
+                run = self.runs.get(r["id"])
+                if run is not None:
+                    with run.lock:
+                        return leader_columns(run.state, run.histories)
+                if r["id"] in self.archives:
+                    return leader_columns(self.archives[r["id"]], self.archive_histories.get(r["id"]))
+            return dict.fromkeys(LEADER_SIGNAL_COLUMNS, "")
         def token_split(r):
             leader, per_agent = r["config"].get("leader"), r.get("agent_usage") or {}
             row = {}
@@ -334,7 +346,8 @@ class LabManager:
                 for key, name in split_keys:
                     values = [per_agent[a][key] for a in agents if key in per_agent[a]]
                     row[f"{side}_{name}"] = (round(sum(values), 6) if key == "cost_usd" else sum(values)) if values else ""
-            # Calls per service tier as OpenAI reported it, e.g. "default:1 flex:11". Empty for other providers.
+            # Calls per service tier as the provider reported it, e.g. "default:1 flex:11" (OpenAI) or
+            # "flex:11 standard:1" (Gemini). Empty for other providers.
             tiers = (per_agent.get(leader) or {}).get("service_tiers") or {}
             row["leader_service_tiers"] = " ".join(f"{k}:{v}" for k, v in sorted(tiers.items()))
             return row
@@ -394,7 +407,7 @@ class LabManager:
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
                              "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))
                              if c["leader"] else "",
-                             **token_split(r), **round_columns(r),
+                             **token_split(r), **round_columns(r), **leader_signals(r),
                              **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 
