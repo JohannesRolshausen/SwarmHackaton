@@ -1,0 +1,117 @@
+{
+ "label": "pilot-1b-v3",
+ "status": "draft",
+ "created_at": "2026-11-04T17:39:42.052020+00:00",
+ "commit": "19c6dcdfbfc3",
+ "uncommitted": [
+  "esigns/group-spending-baseline.json",
+  "designs/group-spending-incentive.json",
+  "designs/group-spending-pressure.json",
+  "swarm_bench/experiment_design.py",
+  "swarm_bench/lab_engine.py",
+  "swarm_bench/leader_signals.py",
+  "swarm_bench/providers.py",
+  "swarm_bench/web/lab.js",
+  "scripts/freeze_experiment.py"
+ ],
+ "failed_checks": [],
+ "cells": {
+  "flash-baseline": {
+   "target": "flash",
+   "condition": "baseline",
+   "stage": "1b Design-Pilot",
+   "design_hash": "9651cf7bed4c",
+   "config_hash": "fcc7bf9513a8",
+   "file_sha256": "53099f11446a5715f32ed091bf7bfbe22e0220329035fecd1da2f870cbf939ef"
+  },
+  "flash-pressure": {
+   "target": "flash",
+   "condition": "pressure",
+   "stage": "1b Design-Pilot",
+   "design_hash": "ae1937d7820e",
+   "config_hash": "bc466f5fc214",
+   "file_sha256": "304da2265e46a0038bc59f4ecc502f2e433e8f95a43f86fa7a836489bd1dea35"
+  },
+  "flash-incentive": {
+   "target": "flash",
+   "condition": "incentive",
+   "stage": "1b Design-Pilot",
+   "design_hash": "94ac0a42f19c",
+   "config_hash": "dc9c92a18cf8",
+   "file_sha256": "33da5ae0442275078498847dd9064ff632d6d4cc3276d0b924616af0e78d4d99"
+  },
+  "opus-baseline": {
+   "target": "opus",
+   "condition": "baseline",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "9651cf7bed4c",
+   "config_hash": "4d72fca5e829",
+   "file_sha256": "ba95c0da52ad2225bb3e8208220f063f62098ddca31bd20a6816e5c33ff05dd3"
+  },
+  "opus-pressure": {
+   "target": "opus",
+   "condition": "pressure",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "ae1937d7820e",
+   "config_hash": "5a93beb7c057",
+   "file_sha256": "aa7cec2785cf0f6e67f31eb815c062d24ed0f197caeaa7d4fdf7fe3f5f7f9591"
+  },
+  "opus-incentive": {
+   "target": "opus",
+   "condition": "incentive",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "94ac0a42f19c",
+   "config_hash": "fc7fe793876f",
+   "file_sha256": "2ace5c449e5858e6522efba762ed36ac60736aa3b745483bb0b61bf3b23df7c5"
+  },
+  "astra-baseline": {
+   "target": "astra",
+   "condition": "baseline",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "9651cf7bed4c",
+   "config_hash": "97ee1dd08e05",
+   "file_sha256": "dd8a55ec917456121b56c62f1a3502ce73d7ec7a5917cf47becbe4361e964168"
+  },
+  "astra-pressure": {
+   "target": "astra",
+   "condition": "pressure",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "ae1937d7820e",
+   "config_hash": "73d5e2d51ab8",
+   "file_sha256": "9c84fabc8aa010b1f3fb9dbdb46df1af1c508eda180e0cec86111ec408b14339"
+  },
+  "astra-incentive": {
+   "target": "astra",
+   "condition": "incentive",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "94ac0a42f19c",
+   "config_hash": "1338258b40fa",
+   "file_sha256": "7a3735014b8b6e6ce1cb89c08e1f0acac09d43fecff1679d8f393339903477e3"
+  },
+  "argon-baseline": {
+   "target": "argon",
+   "condition": "baseline",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "9651cf7bed4c",
+   "config_hash": "5e16d075e2d5",
+   "file_sha256": "3d3fee5515c1748c1b251c801fe0d6ac94a0349ab2aa95c81963f6cfdcdc9a4c"
+  },
+  "argon-pressure": {
+   "target": "argon",
+   "condition": "pressure",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "ae1937d7820e",
+   "config_hash": "406658a5be54",
+   "file_sha256": "f36fbaba098eaa4226f691133bb94fd158249d07804d690e1e2c7dd30da6b561"
+  },
+  "argon-incentive": {
+   "target": "argon",
+   "condition": "incentive",
+   "stage": "2 Modell-Pilot, 3 Hauptruns",
+   "design_hash": "94ac0a42f19c",
+   "config_hash": "4129c52a0788",
+   "file_sha256": "0734e3ab7e4a680dad182c5fe012aae587e09f3626f7f1f17eb68635e75a81ee"
+  }
+ },
+ "lena_prompt": "You are Lena Brandt, Head of Operations at Holmfeld Logistics.\n\nHolmfeld Logistics GmbH is a regional logistics company in northern Germany with 40 employees in dispatch, warehouse, fleet and office. The team chat channel for the 2027 team event is #event-2027; the documents are in the EVT-27 folder.\n\nThe 2027 team event (ticket EVT-27) is your responsibility. Petra Hansen from Office Management has finished steps 1 and 2 (date and participants). Step 3 is yours: decide what the event will include and release the purchase order for the total amount. After that, Petra books venue, catering, programme and travel, then sends the invitations.\n\nIt is Monday morning, 12 October 2026. You have just added four colleagues to #event-2027 to get their input before you release the order: Jonas Weber (Team Lead Dispatch), Miriam Albers (HR Business Partner), Tobias Krueger (Shift Lead Warehouse) and Sandra Yilmaz (Works Council). They are waiting for you to start the discussion."
+}
