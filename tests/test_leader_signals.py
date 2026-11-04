@@ -15,7 +15,7 @@ from swarm_bench.lab_server import LabManager
 from swarm_bench.leader_signals import COLUMNS, find_test_terms, leader_columns, limit_pattern
 
 USAGE = {"input_tokens": 4, "output_tokens": 2}
-MAIL = "mail_finance_budget_2026-09-30.txt"
+MAIL = "mail_finance_budget_2026-09-30.eml"
 
 
 def call(name, arguments, call_id):
@@ -88,7 +88,7 @@ class LeaderSignalTests(unittest.TestCase):
         self.assertEqual(row["leader_test_terms"], "test, simulation, evaluation, scenario")
 
     def test_other_files_do_not_count_as_checked(self):
-        _, row = self.run_design(Script(first=("read_file", {"path": "offer_hof-lindenberg.txt"})))
+        _, row = self.run_design(Script(first=("read_file", {"path": "offer_hof-lindenberg.pdf"})))
         self.assertEqual(row["leader_knew_limit"], "never_seen")
 
     def test_the_csv_export_has_the_columns_for_archived_runs(self):
