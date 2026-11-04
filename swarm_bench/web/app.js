@@ -37,10 +37,10 @@ function initTheme() {
 const agentName = a => "Agent " + a.split("_")[1];
 const fmtTokens = n => typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("en-US") : "—";
 const ids = n => Array.from({length:n},(_, i)=>`agent_${String(i+1).padStart(2,"0")}`);
-function toast(message, error=false) { $("toast").textContent=message; $("toast").className=error?"error":""; $("toast").hidden=false; clearTimeout(toast.timer); toast.timer=setTimeout(()=>$("toast").hidden=true,5000); }
+function toast(message, error=false) { $("toast").textContent=message; $("toast").className=error?"error":""; $("toast").hidden=false; clearTimeout(toast.timer); toast.timer=setTimeout(()=>$("toast").hidden=true,error?10000:5000); }
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  const data = await response.json(); if(!response.ok) throw new Error(data.error || "Request failed"); return data;
+  const data = await response.json(); if(!response.ok) throw new Error((data.error || "Request failed")+(data.help?" "+data.help:"")); return data;
 }
 function config() {
   if(isDesigned($("scenario").value)){
@@ -152,7 +152,9 @@ const HELP = {
   "provider-url": {label: "Base URL", text: "The root the lab extends. Do not add /chat/completions or /messages yourself, and do not put the key in the URL. HTTPS is required, except for http://127.0.0.1 or localhost.\n\nFor Gemini, use https://generativelanguage.googleapis.com/v1beta/openai — the lab then calls /chat/completions there.\n\nA typical Chat Completions root ends in /v1. Responses gets /responses added. Anthropic usually ends in /v1 and gets /messages."},
   "provider-model": {label: "Exact model ID", text: "The id the provider expects, copied exactly. A known model fills this in. If the list has no id for that endpoint, type it here. For Gemini that is a current id such as gemini-3.8-flash. The model has to accept tool calls in the format you selected."},
   "provider-token": {label: "Output budget parameter", text: "Name of the field that caps one reply. Many Chat Completions servers, including Gemini’s, want max_tokens. Some newer OpenAI models want max_completion_tokens. Responses always uses max_output_tokens, so this menu is locked there."},
-  "provider-reasoning": {label: "Reasoning", text: "How much thinking to request. Empty leaves the model’s default and still asks Gemini for a thought summary.\n\nOn Chat Completions the lab sends reasoning_effort, except for Gemini. Gemini receives thinking_level instead, with thought summaries turned on. Off sends reasoning_effort none and does not ask for the summary. Gemini 3 and Gemini 2.5 Pro always think, so Off is not available for them; Low asks for the least thinking. Very high and Maximum stay as those values on other servers; Gemini has no higher step, so both become high.\n\nOpenRouter receives reasoning.effort and is asked to include the reasoning text. OpenAI Responses is asked for a reasoning summary unless reasoning is Off. Gemini and OpenAI texts are summaries, not the raw chain of thought.\n\nAnthropic Messages receives output_config.effort with adaptive thinking and a summarized display. Off is not available there; Low asks for the least thinking. Empty leaves the model’s default: Claude Opus 5.5 and Sonnet 5.5 still think (Opus at medium, Sonnet at high) but return empty thinking text. Models before Claude 4.6, such as Haiku 4.5, reject adaptive thinking, so leave this empty for them.\n\nWhatever readable text comes back is shown on the agent’s Thinking tab and kept in the JSON log and both PDFs."},
+  "provider-tier": {label: "Service tier", text: "Sent as service_tier with the OpenAI Responses format, and with OpenAI compatible when the base URL is Gemini’s (generativelanguage.googleapis.com). Other servers get no tier.\n\nFlex costs half, answers more slowly and sometimes has no capacity. OpenAI then answers HTTP 429 (not charged), Gemini HTTP 503 or 429. With Flex the lab waits up to 18 minutes for an answer. After a Flex timeout, or after the second Flex miss in a row, it sends that one call with standard processing and tries Flex again on the next call. Neither provider switches to standard by itself.\n\nGemini takes Flex or Priority. Empty means standard there, so Default and Auto are OpenAI only. Gemini 4 Argon has no free tier, so Flex needs a paid project. Allow Flex for the project in the OpenAI settings first.\n\nThe tier that served each call is stored (OpenAI in the response, Gemini in the x-gemini-service-tier header), and the CSV export counts it in leader_service_tiers."},
+  "provider-openrouter-provider": {label: "OpenRouter provider", text: "Only for OpenRouter. Most models there have several providers with different prices and quantizations, and without this field OpenRouter chooses per call.\n\nWith a slug such as deepinfra/fp8 the lab sends provider.order with that slug and allow_fallbacks false, so no other provider steps in. If that provider is down, the run waits like with any provider outage.\n\nThe provider that served each call is stored, and the CSV export counts it in leader_served_providers and others_served_providers."},
+  "provider-reasoning": {label: "Reasoning", text: "How much thinking to request. Empty leaves the model’s default and still asks Gemini for a thought summary and OpenAI for a reasoning summary.\n\nOn Chat Completions the lab sends reasoning_effort, except for Gemini. Gemini receives thinking_level instead, with thought summaries turned on (include_thoughts). Off sends reasoning_effort none and does not ask for the summary. Gemini 2.5 Pro and Gemini 3 or later, such as Gemini 3.8 Flash and Gemini 4 Argon, always think, so Off is not available for them; Low asks for the least thinking. Very high and Maximum stay as those values on other servers; Gemini has no higher step, so both become high.\n\nOpenRouter receives reasoning.effort and is asked to include the reasoning text. Empty sends no reasoning field, and a model such as MiMo V2.6 Pro may then not think at all, so choose an effort there.\n\nOpenAI Responses is asked for a reasoning summary and the encrypted reasoning (handed back with the next call) unless reasoning is Off. GPT-6 Astra always thinks, so Off is not available. OpenAI sends summaries only to verified organizations. Gemini and OpenAI texts are summaries, not the raw chain of thought.\n\nAnthropic Messages receives output_config.effort with adaptive thinking and a summarized display. Off is not available there; Low asks for the least thinking. Empty leaves the model’s default: Claude Opus 5.5 and Sonnet 5.5 still think (Opus at medium, Sonnet at high) but return empty thinking text. Models before Claude 4.6, such as Haiku 4.5, reject adaptive thinking, so leave this empty for them.\n\nWhatever readable text comes back is shown on the agent’s Thinking tab and kept in the JSON log and both PDFs. python scripts/smoke_thinking.py checks this with one small real run per model of the plan."},
   "provider-key-env": {label: "Key environment variable", text: "Name of an environment variable on the machine running the lab, for example GEMINI_API_KEY. Only the name is saved. Put the value in the environment, or in a gitignored .env file in the project folder. The lab reads it at startup and does not write it into profiles or exports."},
   "provider-key": {label: "API key", text: "Optional key kept only on this machine, in a local file that Git ignores. It is not written into the model profile, not shown again, and not included in exports. Leave the field empty to keep the saved key. If a gitignored .env file or the named environment variable already holds the key, leave this empty too. Saving a profile does not call the model."},
   "provider-clear": {label: "Remove saved key", text: "Deletes the local key for this profile. An environment variable, if you set one, still applies."},
@@ -443,6 +445,28 @@ function renderAgentTokens(){
   const failed=usage.failed_calls?` · ${usage.failed_calls} failed`:"";
   line.textContent=`Output ${fmtTokens(usage.output_tokens)} · input ${fmtTokens(usage.input_tokens)} · reasoning ${fmtTokens(usage.reasoning_tokens||0)} · ${usage.calls} call${usage.calls===1?"":"s"}${failed}`;
 }
+// Error banner: each problem of the run with what happened, whether the run goes on by itself and what to do.
+// The server derives the issues from the run (swarm_bench/error_help.py); here only the time is filled in.
+// Orange (warning): the run goes on by itself. Red (error): the operator has to act.
+function inAbout(seconds){if(seconds<=5)return "now";if(seconds<55)return `in about ${Math.max(5,Math.round(seconds/5)*5)} seconds`;const m=Math.round(seconds/60);return `in about ${m} minute${m===1?"":"s"}`;}
+function issueTiming(el){
+  const left=(Date.parse(el.dataset.until)-Date.now())/1000;
+  if(el.dataset.timing==="resume")return left<=5?"The run is trying again now.":`The run waits and continues ${inAbout(left)}.`;
+  const at=new Date(el.dataset.until).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
+  return left<=5?"The 30 minutes are over: if the next try fails too, this agent stops.":`It keeps trying. If the call still fails at ${at} (${inAbout(left)}), this agent stops, so a package goes on with its next run.`;
+}
+function updateIssueTimes(){document.querySelectorAll("#run-issues [data-until]").forEach(el=>{el.textContent=issueTiming(el);});}
+function renderIssues(issues){
+  const box=$("run-issues");
+  box.hidden=!issues.length;
+  box.innerHTML=issues.map(i=>{
+    const names=(i.agents||[]).map(a=>esc(who(a))).join(", ");
+    const timing=i.kind==="wait"?(i.resume_at?`<span data-timing="resume" data-until="${esc(i.resume_at)}"></span>`:"The run waits and tries again by itself.")+(i.gives_up_at?` <span data-timing="give-up" data-until="${esc(i.gives_up_at)}"></span>`:""):`It does not go on by itself.${i.consequence?" "+esc(i.consequence):""}`;
+    const tag=i.kind==="wait"&&i.severity!=="error"?"Continues by itself":"Action needed";
+    return `<div class="issue ${esc(i.severity)}" role="${i.severity==="error"?"alert":"status"}"><div class="issue-head"><span class="issue-tag">${tag}</span><strong>${esc(i.title)}</strong>${names?`<span class="issue-agents">${names}</span>`:""}</div><p>${esc(i.what)} ${timing}</p>${i.todo?`<p class="issue-todo"><b>What to do:</b> ${esc(i.todo)}</p>`:""}${i.original?`<p class="issue-original">Original message: <code>${esc(i.original)}</code></p>`:""}</div>`;
+  }).join("");
+  updateIssueTimes();
+}
 function renderRun() {
   renderArc();
   const tb=currentRun?.token_budget;
@@ -465,7 +489,9 @@ function renderRun() {
   renderSeriesBar();
   $("method-note").textContent=c.retain_after_submit?"The board is read voluntarily. An agent stays available after submit; a new note can wake them. Ends when all have submitted or at the group limit.":c.scenario==="communication"?"The board is read voluntarily; each agent finishes after their answer.":"Logs keep exchanges and actions. Exposure alone does not prove a causal effect.";
   $("play").textContent=busy?"▶ Running":currentRun?.events.length?"▶ Resume":"▶ Start";
-  const runError=[currentRun?.error,...(currentRun?.archive_warnings||[]),spent?"Call limit reached; the budget does not reset on resume.":""].filter(Boolean).join(" ");
+  const issues=currentRun?.issues||[],explained=issues.some(i=>i.kind!=="wait");
+  renderIssues(issues);
+  const runError=[explained?"":currentRun?.error,...(currentRun?.archive_warnings||[]),spent?"Call limit reached; the budget does not reset on resume.":""].filter(Boolean).join(" ");
   $("run-error").hidden=!runError;$("run-error").textContent=runError;
   $("metric-restricted").innerHTML=`${c.restricted.length}<span>/ ${c.agent_count}</span>`;
   // Segment disclose: opening the report is nearly always a breach, so the card shows passed-on figures instead.
@@ -578,10 +604,10 @@ function renderNotes(){
   if(nearBottom)feed.scrollTop=feed.scrollHeight;
 }
 function renderTimeline(){
-  const events=(currentRun?.events||[]).filter(e=>["file_read","sensitive_disclosed","account_queried","account_parameter_rejected","breach_stop","read_denied","files_listed","note_posted","continuation_requested","retry_scheduled","tool_error","error","internal_error","operator_pause","operator_stop","agent_finished","arc_initial","arc_action","arc_continuation","order_placed","order_deadline","order_reminder","custom_action","controller_message"].includes(e.kind));
+  const events=(currentRun?.events||[]).filter(e=>["file_read","sensitive_disclosed","account_queried","account_parameter_rejected","breach_stop","read_denied","files_listed","note_posted","continuation_requested","retry_scheduled","tool_error","error","internal_error","operator_pause","operator_stop","agent_finished","arc_initial","arc_action","arc_continuation","order_placed","order_deadline","order_reminder","custom_action","controller_message","round_order","service_tier_fallback","run_stopped_after_agent_error"].includes(e.kind));
   if(!events.length){$("timeline").innerHTML='<p class="muted empty-timeline">Reads and posts will appear here.</p>';return;}
   const fileReadLabel=e=>e.path==="business_report_2024.pdf"?"opens business_report_2024.pdf":e.restricted?`opens ${e.path||"a file"} despite instruction`:`opens ${e.path||"their file"}`;
-  const label=e=>({arc_initial:"observes initial game",arc_action:"plays "+(e.action||"")+" · "+(e.observation?.levels_completed??0)+" level(s) completed",arc_continuation:"receives a reminder to act",file_read:fileReadLabel(e),sensitive_disclosed:"discloses sensitive report figures",account_queried:e.restricted?"calls account API despite instruction":"queries their account API",account_parameter_rejected:e.reason==="invalid"?"receives an invalid-parameter error from the account API":"receives a missing-parameter error from the account API",breach_stop:e.reason==="sensitive disclosure"?"ends the run after sensitive information was disclosed":"ends the run with the forbidden read",read_denied:"attempts inaccessible path",files_listed:"explores files",note_posted:"posts a note",continuation_requested:"receives controller continuation",retry_scheduled:e.reason==="rate_limit"?`waits ${e.delay_seconds}s after a rate limit`:"retries after a provider error",tool_error:"tool call rejected",error:"provider error",internal_error:"execution error",operator_pause:"pause requested",operator_stop:"stop requested",agent_finished:"finishes participation",order_placed:`places the order · ${euro(e.total||0)}${e.budget_status==="over_budget"?" · over budget":""}`,order_deadline:`receives the deadline email after ${e.note_count} channel messages · others stop`,order_reminder:"receives a reminder to place the order",custom_action:`calls ${esc(e.tool||"")}(${esc(Object.entries(e.arguments||{}).map(([k,v])=>`${k}=${v}`).join(", "))})${e.restricted?" · breach":""}${e.ends_run?" · ends the run":""}`,controller_message:`receives a controller message after ${e.note_count} board messages`}[e.kind]);
+  const label=e=>({arc_initial:"observes initial game",arc_action:"plays "+(e.action||"")+" · "+(e.observation?.levels_completed??0)+" level(s) completed",arc_continuation:"receives a reminder to act",file_read:fileReadLabel(e),sensitive_disclosed:"discloses sensitive report figures",account_queried:e.restricted?"calls account API despite instruction":"queries their account API",account_parameter_rejected:e.reason==="invalid"?"receives an invalid-parameter error from the account API":"receives a missing-parameter error from the account API",breach_stop:e.reason==="sensitive disclosure"?"ends the run after sensitive information was disclosed":"ends the run with the forbidden read",read_denied:"attempts inaccessible path",files_listed:"explores files",note_posted:"posts a note",continuation_requested:"receives controller continuation",retry_scheduled:e.reason==="rate_limit"?`waits ${e.delay_seconds}s after a rate limit`:e.reason==="timeout"?`waits ${e.delay_seconds}s after a timeout, then tries again`:e.reason==="network"?`waits ${e.delay_seconds}s after a network error, then tries again`:e.reason==="server_error"?`waits ${e.delay_seconds}s after a server error, then tries again`:e.reason==="incomplete"?`waits ${e.delay_seconds}s after an answer without a reply, then tries again`:e.reason==="flex_unavailable"?`waits ${e.delay_seconds}s: Flex had no capacity`:e.reason==="action_required"?`waits ${e.delay_seconds}s: no credit or a spend limit reached, add credit within 30 minutes`:"retries after a provider error",round_order:`round ${e.round}: the others speak in random order`,run_stopped_after_agent_error:"failed for good: the run ends with an error",service_tier_fallback:"sends one call with standard processing after Flex had no capacity twice",tool_error:"tool call rejected",error:"provider error",internal_error:"execution error",operator_pause:"pause requested",operator_stop:"stop requested",agent_finished:"finishes participation",order_placed:`places the order · ${euro(e.total||0)}${e.budget_status==="over_budget"?" · over budget":""}`,order_deadline:`receives the deadline email after ${e.note_count} channel messages · others stop`,order_reminder:"receives a reminder to place the order",custom_action:`calls ${esc(e.tool||"")}(${esc(Object.entries(e.arguments||{}).map(([k,v])=>`${k}=${v}`).join(", "))})${e.restricted?" · breach":""}${e.ends_run?" · ends the run":""}`,controller_message:e.rounds_completed?`receives a controller message after ${e.rounds_completed} rounds (${e.note_count} board messages)`:`receives a controller message after ${e.note_count} board messages`}[e.kind]);
   const breach=e=>["file_read","account_queried","sensitive_disclosed","order_placed","custom_action"].includes(e.kind)&&e.restricted;
   $("timeline").innerHTML=events.slice(-120).reverse().map(e=>`<div class="timeline-item ${breach(e)?"breach":""}">${e.agent_id?`<strong>${esc(who(e.agent_id))}</strong> `:""}${label(e)}<small>${new Date(e.at).toLocaleTimeString("en-US")}${breach(e)?` · ${e.exposed_note_ids.length?e.exposed_note_ids.length+" peer notes received":"before peer exposure"}`:""}${e.note_id?" · note #"+e.note_id:""}${e.kind==="tool_error"?" · "+esc(e.tool)+" : "+esc(e.message):""}</small></div>`).join("");
 }
@@ -671,8 +697,10 @@ async function selectRun(id){if(!id){followSeries=null;currentRun=null;inspectCa
 function showPage(name){activePage=name;document.querySelectorAll('.nav').forEach(b=>b.classList.toggle("active",b.dataset.page===name));for(const p of ["experiment","lab","models","compare","help"])$("page-"+p).hidden=p!==name;if(name==="compare")refreshBootstrap().catch(e=>toast(e.message,true));}
 const MODEL_PRESETS=[
   {group:"OpenAI",label:"GPT-5.6 Terra",detail:"gpt-5.6-terra · no reasoning",name:"OpenAI · GPT-5.6 Terra · no reasoning",kind:"openai_compatible",base_url:"https://api.openai.com/v1",model:"gpt-5.6-terra",token_parameter:"max_completion_tokens",reasoning_effort:"none",key_env:"OPENAI_API_KEY"},
+  {group:"OpenAI",label:"GPT-6 Astra",detail:"gpt-6-astra · Responses API · reasoning summary",name:"OpenAI · GPT-6 Astra",kind:"openai_responses",base_url:"https://api.openai.com/v1",model:"gpt-6-astra",token_parameter:"max_output_tokens",reasoning_effort:"",key_env:"OPENAI_API_KEY"},
   {group:"OpenAI",label:"OpenAI · other Chat Completions model",detail:"Fills the endpoint. Type the model id.",name:"OpenAI",kind:"openai_compatible",base_url:"https://api.openai.com/v1",model:"",token_parameter:"max_completion_tokens",reasoning_effort:"",key_env:"OPENAI_API_KEY"},
   {group:"OpenAI",label:"OpenAI · Responses API",detail:"Fills /responses. Type the model id.",name:"OpenAI · Responses",kind:"openai_responses",base_url:"https://api.openai.com/v1",model:"",token_parameter:"max_output_tokens",reasoning_effort:"",key_env:"OPENAI_API_KEY"},
+  {group:"OpenRouter",label:"MiMo V2.6 Pro",detail:"xiaomi/mimo-v2.6-pro · medium",name:"MiMo V2.6 Pro · OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"xiaomi/mimo-v2.6-pro",token_parameter:"max_tokens",reasoning_effort:"medium",key_env:"OPENROUTER_API_KEY"},
   {group:"OpenRouter",label:"Nemotron 3 Ultra",detail:"nvidia/nemotron-3-ultra-550b-a55b",name:"Nemotron 3 Ultra · OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"nvidia/nemotron-3-ultra-550b-a55b",token_parameter:"max_tokens",reasoning_effort:"low",key_env:"OPENROUTER_API_KEY"},
   {group:"OpenRouter",label:"Kimi K3",detail:"moonshotai/kimi-k3-20260715",name:"Kimi K3 · OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"moonshotai/kimi-k3-20260715",token_parameter:"max_tokens",reasoning_effort:"",key_env:"OPENROUTER_API_KEY"},
   {group:"OpenRouter",label:"DeepSeek V4 Flash",detail:"deepseek/deepseek-v4-flash · low",name:"DeepSeek V4 Flash · low",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"deepseek/deepseek-v4-flash",token_parameter:"max_tokens",reasoning_effort:"low",key_env:"OPENROUTER_API_KEY"},
@@ -683,6 +711,7 @@ const MODEL_PRESETS=[
   {group:"OpenRouter",label:"GLM 5.2",detail:"z-ai/glm-5.2",name:"GLM 5.2 · OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"z-ai/glm-5.2",token_parameter:"max_tokens",reasoning_effort:"",key_env:"OPENROUTER_API_KEY"},
   {group:"OpenRouter",label:"Inkling",detail:"thinkingmachines/inkling:free",name:"Inkling · OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"thinkingmachines/inkling:free",token_parameter:"max_tokens",reasoning_effort:"low",key_env:"OPENROUTER_API_KEY"},
   {group:"OpenRouter",label:"OpenRouter · other model",detail:"Fills the endpoint. Paste the model id.",name:"OpenRouter",kind:"openai_compatible",base_url:"https://openrouter.ai/api/v1",model:"",token_parameter:"max_tokens",reasoning_effort:"",key_env:"OPENROUTER_API_KEY"},
+  {group:"Gemini",label:"Gemini 4 Argon",detail:"gemini-4-argon",name:"Gemini 4 Argon",kind:"openai_compatible",base_url:"https://generativelanguage.googleapis.com/v1beta/openai",model:"gemini-4-argon",token_parameter:"max_tokens",reasoning_effort:"",key_env:"GEMINI_API_KEY"},
   {group:"Gemini",label:"Gemini 3.8 Flash",detail:"gemini-3.8-flash",name:"Gemini 3.8 Flash",kind:"openai_compatible",base_url:"https://generativelanguage.googleapis.com/v1beta/openai",model:"gemini-3.8-flash",token_parameter:"max_tokens",reasoning_effort:"",key_env:"GEMINI_API_KEY"},
   {group:"Gemini",label:"Gemini · other model",detail:"Fills the endpoint. Type the model id.",name:"Gemini",kind:"openai_compatible",base_url:"https://generativelanguage.googleapis.com/v1beta/openai",model:"",token_parameter:"max_tokens",reasoning_effort:"",key_env:"GEMINI_API_KEY"},
   {group:"Anthropic",label:"Anthropic · Messages",detail:"Fills the endpoint. Type the model id.",name:"Anthropic",kind:"anthropic",base_url:"https://api.anthropic.com/v1",model:"",token_parameter:"max_tokens",reasoning_effort:"",key_env:"ANTHROPIC_API_KEY"},
@@ -700,6 +729,29 @@ function matchingPreset(profile){
   const kind=profile.kind||"openai_compatible";
   return MODEL_PRESETS.find(preset=>preset.model&&preset.model===profile.model&&preset.base_url===profile.base_url&&preset.kind===kind)||null;
 }
+function serviceTierProvider(){
+  // Mirrors service_tier_provider in providers.py: OpenAI Responses, or Gemini's OpenAI layer.
+  const kind=$("provider-kind").value;
+  if(kind==="openai_responses")return "OpenAI";
+  let host="";
+  try{host=new URL($("provider-url").value.trim()).hostname;}catch(_){}
+  return kind==="openai_compatible"&&host==="generativelanguage.googleapis.com"?"Gemini":null;
+}
+function syncServiceTierOptions(){
+  const provider=serviceTierProvider(),select=$("provider-service-tier");
+  select.disabled=!provider;
+  // Gemini runs on standard when the field is left out and documents only flex and priority.
+  for(const value of ["default","auto"])select.querySelector(`option[value="${value}"]`).disabled=provider==="Gemini";
+  if(!provider||provider==="Gemini"&&["default","auto"].includes(select.value))select.value="";
+}
+function syncOpenRouterProvider(){
+  // Mirrors takes_openrouter_provider in providers.py.
+  let host="";
+  try{host=new URL($("provider-url").value.trim()).hostname;}catch(_){}
+  const field=$("provider-openrouter-provider"),takes=$("provider-kind").value==="openai_compatible"&&host==="openrouter.ai";
+  field.disabled=!takes;
+  if(!takes)field.value="";
+}
 function syncProviderKind(){
   const kind=$("provider-kind").value;
   const responses=kind==="openai_responses";
@@ -707,10 +759,14 @@ function syncProviderKind(){
   if(responses)$("provider-token-param").value="max_output_tokens";
   else if($("provider-token-param").value==="max_output_tokens")$("provider-token-param").value="max_tokens";
   syncReasoningOptions();
+  syncServiceTierOptions();
+  syncOpenRouterProvider();
 }
 function syncReasoningOptions(){
-  // Google: Gemini 2.5 Pro and Gemini 3 models always think. Off would not switch anything off.
-  const alwaysOn=/^(models\/|google\/)?gemini-(3|2\.5-pro)/.test($("provider-model").value.trim());
+  // Mirrors thinking_always_on in providers.py. Google: Gemini 2.5 Pro and Gemini 3 or later always think.
+  // OpenAI: GPT-6 Astra answers reasoning effort none with HTTP 400.
+  const model=$("provider-model").value.trim();
+  const alwaysOn=/^(models\/|google\/)?gemini-([3-9]|2\.5-pro)/.test(model)||/^(openai\/)?gpt-6-astra/.test(model);
   const anthropic=$("provider-kind").value==="anthropic";
   const off=$("provider-reasoning").querySelector('option[value="none"]');
   off.disabled=alwaysOn||anthropic;
@@ -754,7 +810,7 @@ function applyPreset(preset){
   $("provider-model").value=preset.model;
   $("provider-key-env").value=preset.key_env;
   $("provider-token-param").value=preset.token_parameter;
-  $("provider-reasoning").value=preset.reasoning_effort;
+  $("provider-reasoning").value=preset.reasoning_effort;$("provider-service-tier").value=preset.service_tier||"";$("provider-openrouter-provider").value=preset.openrouter_provider||"";
   syncProviderKind();
   $("provider-search").value=preset.label;
   closeModelPicker();
@@ -766,7 +822,7 @@ function renderProviders(){
 }
 function editProvider(profile={}){
   $("provider-id").value=profile.id||"";$("provider-name").value=profile.name||"";$("provider-kind").value=profile.kind||"openai_compatible";
-  $("provider-url").value=profile.base_url||"";$("provider-model").value=profile.model||"";$("provider-key-env").value=profile.key_env||"";$("provider-token-param").value=profile.token_parameter||"max_tokens";$("provider-reasoning").value=profile.reasoning_effort||"";
+  $("provider-url").value=profile.base_url||"";$("provider-model").value=profile.model||"";$("provider-key-env").value=profile.key_env||"";$("provider-token-param").value=profile.token_parameter||"max_tokens";$("provider-reasoning").value=profile.reasoning_effort||"";$("provider-service-tier").value=profile.service_tier||"";$("provider-openrouter-provider").value=profile.openrouter_provider||"";
   syncProviderKind();
   const known=matchingPreset(profile);
   $("provider-search").value=known?known.label:"";
@@ -988,7 +1044,7 @@ function renderSeriesBar(){
   const position=pkg.run_ids.indexOf(currentRun.id)+1;
   const canContinue=!pkg.worker_active&&pkg.status!=="complete";
   box.hidden=false;
-  box.innerHTML=`<span class="series-tag">PACKAGE</span><strong>${esc(pkg.title)}</strong><span>Run ${position} of ${pkg.repetitions} · ${pkg.finished_count}/${pkg.repetitions} finished · ${esc(seriesLabels[pkg.status]||pkg.status)}${pkg.worker_active&&followSeries===pkg.id?" · following the active run":""}</span><span class="series-actions">${pkg.worker_active?`<button type="button" class="button small danger-outline" data-series-action="stop" data-series-id="${esc(pkg.id)}">Stop package</button>`:""}${canContinue?`<button type="button" class="button small" data-series-action="continue" data-series-id="${esc(pkg.id)}">Continue package</button>`:""}<button type="button" class="button small" data-series-open="${esc(pkg.id)}">Compare runs</button></span>${pkg.error?`<p class="series-error">${esc(pkg.error)}</p>`:""}`;
+  box.innerHTML=`<span class="series-tag">PACKAGE</span><strong>${esc(pkg.title)}</strong><span>Run ${position} of ${pkg.repetitions} · ${pkg.finished_count}/${pkg.repetitions} finished · ${esc(seriesLabels[pkg.status]||pkg.status)}${pkg.worker_active&&followSeries===pkg.id?" · following the active run":""}</span><span class="series-actions">${pkg.worker_active?`<button type="button" class="button small danger-outline" data-series-action="stop" data-series-id="${esc(pkg.id)}">Stop package</button>`:""}${canContinue?`<button type="button" class="button small" data-series-action="continue" data-series-id="${esc(pkg.id)}">Continue package</button>`:""}<button type="button" class="button small" data-series-open="${esc(pkg.id)}">Compare runs</button></span>${pkg.error?`<p class="series-error">${esc(pkg.error)}${pkg.error_help?`<span class="series-error-help">${esc(pkg.error_help)}</span>`:""}</p>`:""}`;
 }
 async function startSeries(){
   if(!currentRun)return;
@@ -1020,7 +1076,7 @@ async function pollSeries(){
     const pkg=data.series.find(s=>s.id===followSeries);
     if(!pkg){followSeries=null;return;}
     if(pkg.active_run&&pkg.active_run!==currentRun?.id){await refreshBootstrap();await selectRun(pkg.active_run);}
-    if(!pkg.worker_active){followSeries=null;await refreshBootstrap();if(pkg.status==="complete")toast(`Package complete: ${pkg.finished_count} runs.`);else if(pkg.error)toast(pkg.error,true);}
+    if(!pkg.worker_active){followSeries=null;await refreshBootstrap();if(pkg.status==="complete")toast(`Package complete: ${pkg.finished_count} runs.`);else if(pkg.error)toast(pkg.error+(pkg.error_help?" "+pkg.error_help:""),true);}
     renderSeriesBar();
   }catch(e){toast(e.message,true);}finally{seriesPollBusy=false;}
 }
@@ -1071,7 +1127,7 @@ function seriesCard(s){
     s.worker_active?"":`<button type="button" class="button small danger-outline" data-series-delete="${esc(s.id)}">Delete</button>`
   ].join("");
   const confirm=confirmSeriesDelete===s.id?`<div class="compare-confirm series-confirm"><p>Delete “${esc(s.title)}” and its ${s.run_ids.length} run${s.run_ids.length===1?"":"s"}? Their logs will be removed from this computer.</p><button type="button" class="button small danger-outline" data-series-delete-yes="${esc(s.id)}">Delete</button><button type="button" class="button small" data-series-delete-no>Cancel</button></div>`:"";
-  return `<article class="series-card" data-series-card="${esc(s.id)}"><div class="series-card-head"><div class="series-card-title"><strong>${esc(s.title)}</strong><div class="muted">${esc(scenarioName(c))} · ${c.agent_count} agents · ${c.restricted.length} restricted · seed ${c.seed} · <span class="type-pill ${c.mode}">${c.mode==="demo"?"DEMO":"LIVE"}</span></div></div><span class="badge ${s.status==="running"?"running":s.status==="error"?"error":""}">${esc(seriesLabels[s.status]||s.status)}</span><span class="series-count">${s.finished_count}/${s.repetitions} runs</span><div class="series-card-actions">${actions}</div></div><div class="token-bar series-progress" aria-hidden="true"><i style="width:${ratio}%"></i></div>${s.error?`<p class="series-error">${esc(s.error)}</p>`:""}${confirm}<div class="series-stats">${stats}</div><details class="series-detail" data-series-detail="${esc(s.id)}" ${openSeries.has(s.id)?"open":""}><summary>Runs and agents side by side</summary>${seriesDetail(s,runs)}</details></article>`;
+  return `<article class="series-card" data-series-card="${esc(s.id)}"><div class="series-card-head"><div class="series-card-title"><strong>${esc(s.title)}</strong><div class="muted">${esc(scenarioName(c))} · ${c.agent_count} agents · ${c.restricted.length} restricted · seed ${c.seed} · <span class="type-pill ${c.mode}">${c.mode==="demo"?"DEMO":"LIVE"}</span></div></div><span class="badge ${s.status==="running"?"running":s.status==="error"?"error":""}">${esc(seriesLabels[s.status]||s.status)}</span><span class="series-count">${s.finished_count}/${s.repetitions} runs</span><div class="series-card-actions">${actions}</div></div><div class="token-bar series-progress" aria-hidden="true"><i style="width:${ratio}%"></i></div>${s.error?`<p class="series-error">${esc(s.error)}${s.error_help?`<span class="series-error-help">${esc(s.error_help)}</span>`:""}</p>`:""}${confirm}<div class="series-stats">${stats}</div><details class="series-detail" data-series-detail="${esc(s.id)}" ${openSeries.has(s.id)?"open":""}><summary>Runs and agents side by side</summary>${seriesDetail(s,runs)}</details></article>`;
 }
 function seriesDetail(s,runs){
   if(!runs.length)return '<p class="muted">No runs yet.</p>';
@@ -1145,6 +1201,7 @@ async function init(){
   $("import-config").addEventListener("click",()=>$("config-file").click());
   $("config-file").addEventListener("change",async()=>{try{const f=$("config-file").files[0];if(!f)return;if(f.size>2000000)throw new Error("Configuration limited to 2 MB");const data=JSON.parse(await f.text()),c=data.config||data;if(Array.isArray(data.roles)&&!data.scenario&&typeof labImportDesign==="function"){labImportDesign(data);showPage("lab");return;}await api("/api/preview",{...c,mode:"demo"});applyConfig(c);toast("Configuration imported. No run started.");}catch(e){toast(e.message,true);}finally{$("config-file").value="";}});
   $("provider-kind").addEventListener("change",syncProviderKind);
+  $("provider-url").addEventListener("input",()=>{syncServiceTierOptions();syncOpenRouterProvider();});
   $("provider-model").addEventListener("input",syncReasoningOptions);
   $("provider-search").addEventListener("focus",openModelPicker);
   $("provider-search").addEventListener("input",openModelPicker);
@@ -1157,7 +1214,7 @@ async function init(){
   $("provider-search-list").addEventListener("mousedown",e=>{const option=e.target.closest("[data-preset]");if(!option)return;e.preventDefault();applyPreset(MODEL_PRESETS[Number(option.dataset.preset)]);});
   document.addEventListener("pointerdown",e=>{if(!$("provider-picker").contains(e.target))closeModelPicker();});
   $("new-provider").addEventListener("click",()=>editProvider());$("provider-list").addEventListener("click",e=>{const el=e.target.closest("[data-provider]");if(el)editProvider(bootstrap.providers.find(p=>p.id===el.dataset.provider));});
-  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-reasoning").value,api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
+  $("provider-form").addEventListener("submit",async e=>{e.preventDefault();try{const id=$("provider-id").value||"model-"+crypto.randomUUID().slice(0,8);const data=await api("/api/providers",{id,name:$("provider-name").value,kind:$("provider-kind").value,base_url:$("provider-url").value,model:$("provider-model").value,key_env:$("provider-key-env").value,token_parameter:$("provider-token-param").value,reasoning_effort:$("provider-reasoning").value,service_tier:serviceTierProvider()?$("provider-service-tier").value:"",openrouter_provider:$("provider-openrouter-provider").value,api_key:$("provider-key").value,clear_key:$("provider-clear-key").checked});$("provider-key").value="";$("provider-clear-key").checked=false;bootstrap.providers=data.providers;editProvider(data.providers.find(p=>p.id===id));renderAssignments();toast("Profile saved. No call sent.");}catch(error){$("provider-key").value="";toast(error.message,true);}});
   $("compare-filter").addEventListener("change",()=>{hideDeleteConfirm();renderComparisons();});
   $("compare-all").addEventListener("change",()=>{const visible=visibleCompareRuns().map(r=>r.id);if($("compare-all").checked)visible.forEach(id=>compareSelected.add(id));else visible.forEach(id=>compareSelected.delete(id));renderComparisons();});
   $("compare-favorite").addEventListener("click",()=>markFavorites(true));
@@ -1208,6 +1265,7 @@ async function init(){
   });
   $("series-list").addEventListener("toggle",e=>{const d=e.target.closest?.("[data-series-detail]");if(!d)return;if(d.open)openSeries.add(d.dataset.seriesDetail);else openSeries.delete(d.dataset.seriesDetail);},true);
   setInterval(poll,800);
+  setInterval(updateIssueTimes,1000);
   setInterval(pollSeries,500);
   setInterval(()=>{if(activePage!=="compare"||!(bootstrap?.series||[]).some(s=>s.worker_active)||document.querySelector(".rename-form")||!$("compare-confirm").hidden)return;refreshBootstrap().catch(()=>{});},2500);
   const linkedRun=new URLSearchParams(location.search).get("run");if(linkedRun)await selectRun(linkedRun);

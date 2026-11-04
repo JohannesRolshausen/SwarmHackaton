@@ -1,5 +1,6 @@
 """Provider adapters. No default credentials, model IDs or network calls at import time."""
 import copy
+import http.client
 import json
 import os
 import re
@@ -20,6 +21,60 @@ class ProviderError(Exception):
         self.diagnostic = diagnostic or {}
 
 
+# A 429 with one of these codes is not a rate limit: no retry helps until someone adds credit or raises a limit.
+ACTION_REQUIRED_CODES = ("credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
+                         "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "billing_hard_limit_reached")
+SERVICE_TIERS = ("", "auto", "default", "flex", "priority")
+GEMINI_HOST = "generativelanguage.googleapis.com"
+# Gemini's OpenAI layer takes service_tier like OpenAI. Without the field a call runs on the standard tier,
+# so only the documented values that change something are allowed.
+GEMINI_SERVICE_TIERS = ("", "flex", "priority")
+OPENROUTER_HOST = "openrouter.ai"
+# OpenAI's Flex guide raises the SDK timeout to 15 minutes, Google's asks for 10 minutes or more and uses 15 in its
+# examples. A little more, since a timeout cancels the response.
+FLEX_TIMEOUT_SECONDS = 1080
+
+
+def service_tier_provider(profile):
+    """Who takes service_tier for this profile: "OpenAI" (Responses format), "Gemini" (its OpenAI layer) or None."""
+    if profile.get("kind") == "openai_responses":
+        return "OpenAI"
+    if profile.get("kind") == "openai_compatible" and urlparse(profile.get("base_url") or "").hostname == GEMINI_HOST:
+        return "Gemini"
+    return None
+
+
+def takes_openrouter_provider(profile):
+    """Only OpenRouter routes between several providers of one model."""
+    return (profile.get("kind") == "openai_compatible"
+            and urlparse(profile.get("base_url") or "").hostname == OPENROUTER_HOST)
+
+
+def credit_too_low(raw):
+    """Anthropic reports missing credit as a plain 400 and names it only in the message. Only a flag is kept."""
+    try:
+        error = json.loads(raw).get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return isinstance(message, str) and "credit balance" in message.lower()
+
+
+def error_code(raw):
+    """error.code (or error.type) from an error body. Only a short identifier is kept, never the message."""
+    try:
+        error = json.loads(raw).get("error")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(error, dict):
+        return None
+    for field in ("code", "type"):
+        value = error.get(field)
+        if isinstance(value, str) and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+            return value
+    return None
+
+
 def response_diagnostic(data):
     """Structural evidence only: never log prompts, reasoning or credentials."""
     if not isinstance(data, dict):
@@ -31,22 +86,60 @@ def response_diagnostic(data):
             "message_type": type(first.get("message")).__name__ if isinstance(first, dict) else None}
 
 
+def is_wait_status(code):
+    """An HTTP status or provider error code the run waits out: a timeout, a rate limit or any server error."""
+    return isinstance(code, int) and not isinstance(code, bool) and (code in (408, 429) or 500 <= code <= 599)
+
+
+def incomplete(message, data=None, usage=None):
+    """The provider answered, but without a usable reply (empty, null or a failed response). The run waits."""
+    return ProviderError(message + " The run waits and tries again.", usage=usage, retryable=True,
+                         diagnostic={**(response_diagnostic(data) if isinstance(data, dict) else {}),
+                                     "incomplete_response": True})
+
+
 def check_provider_error(data, usage=None):
     error = data.get("error") if isinstance(data, dict) else None
     choices = data.get("choices") if isinstance(data, dict) else None
     if not error and isinstance(choices, list) and choices and isinstance(choices[0], dict):
         error = choices[0].get("error")
     if error:
-        code = error.get("code") if isinstance(error, dict) else None
-        code = code if isinstance(code, int) else None
+        raw_code = error.get("code") if isinstance(error, dict) else None
+        code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
+        if code == 402:
+            # OpenRouter: no credit left. Only the operator can fix it.
+            raise ProviderError("Provider refused the call: no credit left (code 402). "
+                                "The run tries again every minute for 30 minutes, then stops. Add credit.",
+                                usage=usage, diagnostic={**response_diagnostic(data), "provider_error_code": code,
+                                                         "action_required": True})
+        # Without any code the error says nothing about the request: treat it like a server error and wait.
+        unspecified = raw_code is None
         raise ProviderError(f"Provider error in JSON (code {code or 'unspecified'}).",
-                            usage=usage, retryable=code in (408, 429, 500, 502, 503, 504),
-                            diagnostic={**response_diagnostic(data), "provider_error_code": code})
+                            usage=usage, retryable=unspecified or is_wait_status(code),
+                            diagnostic={**response_diagnostic(data), "provider_error_code": code,
+                                        **({"unspecified_provider_error": True} if unspecified else {})})
 
 
 def thinking_always_on(model):
-    """Google: reasoning cannot be turned off for Gemini 2.5 Pro or Gemini 3 models."""
-    return re.match(r"(models/|google/)?gemini-(3|2\.5-pro)", model or "") is not None
+    """Models whose reasoning cannot be turned off. Google: Gemini 2.5 Pro and Gemini 3 or later, such as
+    Gemini 3.8 Flash and Gemini 4 Argon. OpenAI: GPT-6 Astra answers reasoning effort none with HTTP 400."""
+    model = model or ""
+    return (re.match(r"(models/|google/)?gemini-([3-9]|2\.5-pro)", model) is not None
+            or re.match(r"(openai/)?gpt-6-astra", model) is not None)
+
+
+def summary_needs_verification(raw):
+    """OpenAI answers a reasoning summary request of an unverified organization with HTTP 400 and says so in
+    the message. A 400 that only names reasoning.summary can also mean the model has no summaries, so the
+    verification must be named. Only a flag is kept, never the message."""
+    try:
+        error = json.loads(raw).get("error")
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+        return False
+    message = error["message"].lower()
+    return "verif" in message and ("summar" in message or error.get("param") == "reasoning.summary")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -138,7 +231,9 @@ class ProviderRegistry:
     def save(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("Invalid profile")
-        fields = {"id", "name", "kind", "base_url", "model", "key_env", "token_parameter", "reasoning_effort", "api_key", "clear_key"}
+        fields = {"id", "name", "kind", "base_url", "model", "key_env", "token_parameter", "reasoning_effort", "service_tier",
+                  "openrouter_provider",
+                  "api_key", "clear_key"}
         if set(payload) - fields:
             raise ValueError("Unknown profile field")
         profile = {k: str(payload.get(k, "")).strip() for k in fields - {"api_key", "clear_key"}}
@@ -153,7 +248,21 @@ class ProviderRegistry:
         if profile["kind"] == "anthropic" and profile["reasoning_effort"] == "none":
             raise ValueError("Anthropic Messages has no Off setting here. Choose Low for the least thinking")
         if profile["reasoning_effort"] == "none" and thinking_always_on(profile["model"]):
-            raise ValueError("This Gemini model cannot turn thinking off. Choose Low, Medium or High")
+            raise ValueError("This model cannot turn thinking off (Gemini 3 and later, Gemini 2.5 Pro, GPT-6 Astra). "
+                             "Choose Low, Medium or High")
+        if profile["service_tier"] not in SERVICE_TIERS:
+            raise ValueError("Unknown service tier")
+        tier_provider = service_tier_provider(profile)
+        if profile["service_tier"] and not tier_provider:
+            raise ValueError("A service tier such as Flex is only sent with the OpenAI Responses format "
+                             "or to Gemini (generativelanguage.googleapis.com)")
+        if tier_provider == "Gemini" and profile["service_tier"] not in GEMINI_SERVICE_TIERS:
+            raise ValueError("Gemini takes only Flex or Priority as service tier. Leave it empty for standard")
+        if profile["openrouter_provider"]:
+            if not takes_openrouter_provider(profile):
+                raise ValueError("A fixed provider only works with OpenRouter (openrouter.ai) in the OpenAI compatible format")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,59}(/[a-z0-9][a-z0-9._-]{0,59})?", profile["openrouter_provider"]):
+                raise ValueError("Invalid OpenRouter provider. Use a slug such as deepinfra or deepinfra/fp8")
         if profile["key_env"] and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", profile["key_env"]):
             raise ValueError("Invalid key environment variable name")
         if profile["base_url"]:
@@ -482,9 +591,14 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                    "tools": [{"type": "function", **copy.deepcopy(t["function"])} for t in tools]}
         if profile.get("reasoning_effort"):
             payload["reasoning"] = {"effort": profile["reasoning_effort"]}
-        # Summary is the readable text OpenAI will return. Raw reasoning stays encrypted.
+        # Summary is the readable text OpenAI will return. Raw reasoning stays encrypted. With store false
+        # the encrypted reasoning is the only way to hand it back with the next call; OpenAI now sends it
+        # by default in stateless mode and still accepts the include value, which older versions needed.
         if profile.get("reasoning_effort") != "none":
             payload.setdefault("reasoning", {})["summary"] = "auto"
+            payload["include"] = ["reasoning.encrypted_content"]
+        if profile.get("service_tier"):
+            payload["service_tier"] = profile["service_tier"]
         headers = {"Authorization": "Bearer " + key} if key else {}
     else:
         endpoint = profile["base_url"] + "/chat/completions"
@@ -493,8 +607,14 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         if urlparse(profile["base_url"]).hostname == "openrouter.ai" and profile["model"] == "nvidia/nemotron-3-ultra-550b-a55b":
             payload["provider"] = {"max_price": {"prompt": 0.625, "completion": 3.125}}
         host = urlparse(profile["base_url"]).hostname
+        if host == OPENROUTER_HOST and profile.get("openrouter_provider"):
+            # No other provider may step in: the model should run on the same endpoint in every run.
+            payload.setdefault("provider", {}).update(order=[profile["openrouter_provider"]], allow_fallbacks=False)
         effort = profile.get("reasoning_effort") or ""
-        if host == "generativelanguage.googleapis.com":
+        if host == GEMINI_HOST and profile.get("service_tier"):
+            # Top-level field, as with OpenAI. Gemini never upgrades a Flex call to standard by itself.
+            payload["service_tier"] = profile["service_tier"]
+        if host == GEMINI_HOST:
             # reasoning_effort and thinking_config overlap. Together, Gemini keeps the
             # effort and drops the thought summary. The level replaces the effort.
             if effort == "none":
@@ -521,32 +641,78 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     # Independent agents may queue behind one local GPU inference worker.
     # A remote thinking model sends nothing until its whole answer is ready, so the
     # wait grows with the output budget: 60 s of queueing plus 50 tokens per second.
+    tier_provider = service_tier_provider(profile)
+    flex = tier_provider is not None and profile.get("service_tier") == "flex"
+    header_tier = None
     timeout = (600 if urlparse(endpoint).hostname in ("127.0.0.1", "localhost", "::1")
-               else min(600, 60 + output_budget // 50))
+               else FLEX_TIMEOUT_SECONDS if flex else min(600, 60 + output_budget // 50))
     handlers = [NoRedirect()] + ([wire.tap(timeout, key)] if wire is not None else [])
     try:
         with build_opener(*handlers).open(request, timeout=timeout) as response:
             raw = response.read(4_000_001)
+            # Gemini names the tier that served the call in a response header, not in the body.
+            response_headers = getattr(response, "headers", None)
+            if tier_provider == "Gemini" and response_headers is not None:
+                header_tier = response_headers.get("x-gemini-service-tier")
             if wire is not None:
                 wire.received(response.status, response.reason, response.headers, raw)
             if len(raw) > 4_000_000:
                 raise ProviderError("Provider response too large")
             data = json.loads(raw)
     except HTTPError as exc:
+        try:
+            raw_error = exc.read(4_000_001)
+        except Exception:
+            raw_error = None
         if wire is not None:
-            wire.http_error(exc)
+            wire.http_error(exc, raw_error)
+        code = error_code(raw_error)
+        diagnostic = {"http_status": exc.code, **({"provider_error_code_name": code} if code else {}),
+                      **({"service_tier": "flex"} if flex else {})}
         # Never echo the response body, URL or headers: a gateway may reflect a key.
+        if (exc.code == 429 and code in ACTION_REQUIRED_CODES or exc.code == 402
+                or exc.code == 400 and profile["kind"] == "anthropic" and credit_too_low(raw_error)):
+            # OpenAI: 429 with a billing code. OpenRouter: 402. Anthropic: 400 that names the credit balance.
+            code = code or ("credit_balance_too_low" if exc.code == 400 else f"http_{exc.code}")
+            raise ProviderError(f"Provider refused the call: no credit left or a spend limit reached ({code}). "
+                                "The run tries again every minute for 30 minutes, then stops. Add credit or raise the limit.",
+                                diagnostic={**diagnostic, "action_required": True}) from None
+        if (exc.code == 400 and profile["kind"] == "openai_responses" and (payload.get("reasoning") or {}).get("summary")
+                and summary_needs_verification(raw_error)):
+            raise ProviderError("OpenAI refused the reasoning summary (HTTP 400): it returns summaries only to verified "
+                                "organizations. Verify the organization in the OpenAI settings, then start a new run.",
+                                diagnostic={**diagnostic, "summary_verification": True}) from None
+        # OpenAI answers a Flex call without capacity with 429. Gemini uses 503 (at capacity) or 429.
+        if flex and (exc.code == 429 or tier_provider == "Gemini" and exc.code == 503):
+            charge = ", not charged" if tier_provider == "OpenAI" else ""
+            raise ProviderError(f"{tier_provider} Flex has no capacity right now (HTTP {exc.code}{charge}). "
+                                "The run waits and tries again, after two misses in a row with standard processing.",
+                                retryable=True, diagnostic={**diagnostic, "flex_unavailable": True}) from None
         raise ProviderError(f"Provider returned HTTP {exc.code}. Check the profile and limits.",
-                            retryable=exc.code in (408, 429, 500, 502, 503, 504), diagnostic={"http_status": exc.code}) from None
+                            retryable=is_wait_status(exc.code), diagnostic=diagnostic) from None
     except TimeoutError as exc:
         if wire is not None:
             wire.failed("timeout", exc)
-        raise ProviderError(f"Provider did not respond within {timeout} seconds.", retryable=True,
-                            diagnostic={"timeout_seconds": timeout}) from None
-    except (URLError, OSError, ValueError) as exc:
-        if wire is not None and not isinstance(exc, ValueError):
+        raise ProviderError(f"Provider did not respond within {timeout} seconds. The run waits and tries again.",
+                            retryable=True,
+                            diagnostic={"timeout_seconds": timeout, **({"service_tier": "flex", "flex_unavailable": True}
+                                                                       if flex else {})}) from None
+    except http.client.HTTPException as exc:
+        # The connection broke while the answer was sent (IncompleteRead) or the reply was no valid HTTP.
+        if wire is not None:
+            wire.failed("connection broke off", exc)
+        raise ProviderError("The connection to the provider broke off during the answer. The run waits and tries again.",
+                            retryable=True, diagnostic={"network_error": True, "cut_off": True}) from None
+    except (URLError, OSError) as exc:
+        if wire is not None:
             wire.failed("connection failed", exc)
-        raise ProviderError("Connection failed or invalid JSON from provider") from None
+        raise ProviderError("Connection to the provider failed. The run waits and tries again.", retryable=True,
+                            diagnostic={"network_error": True}) from None
+    except ValueError:
+        raise ProviderError("The provider sent a response that is not valid JSON. The run waits and tries again.",
+                            retryable=True, diagnostic={"invalid_json": True}) from None
+    if data is None:
+        raise incomplete("The provider sent an empty answer (null).")
     if not isinstance(data, dict):
         raise ProviderError("Response format incompatible with the chosen profile")
     usage = data.get("usage")
@@ -565,6 +731,16 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     reported_usage[field] = value
                     reported_usage["input_tokens"] += value
+        elif profile["kind"] != "anthropic":
+            # OpenAI, Gemini and OpenRouter cache on their own and count the cached part
+            # inside the prompt tokens. Report it, without adding it to input_tokens again.
+            prompt_details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+            if isinstance(prompt_details, dict):
+                for source, field in (("cached_tokens", "cache_read_input_tokens"),
+                                      ("cache_write_tokens", "cache_creation_input_tokens")):
+                    value = prompt_details.get(source)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        reported_usage[field] = value
         details = usage.get("output_tokens_details", usage.get("completion_tokens_details"))
         reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) and reasoning_tokens >= 0:
@@ -582,6 +758,16 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
         cost = usage.get("cost")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
             reported_usage["cost_usd"] = cost
+    # The tier that actually served the call. A Flex request can come back as default (OpenAI),
+    # a Priority request as standard (Gemini).
+    tier = header_tier if tier_provider == "Gemini" else data.get("service_tier") if tier_provider == "OpenAI" else None
+    tier = tier.strip().lower() if isinstance(tier, str) else None
+    if tier and re.fullmatch(r"[a-z_]{1,30}", tier):
+        reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "service_tier": tier}
+    # OpenRouter names the provider that served the call in the body.
+    served = data.get("provider") if urlparse(profile["base_url"]).hostname == OPENROUTER_HOST else None
+    if isinstance(served, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}", served):
+        reported_usage = {"input_tokens": None, "output_tokens": None, **(reported_usage or {}), "served_provider": served}
     check_provider_error(data, reported_usage)
     try:
         if (data.get("stop_reason") == "max_tokens" or
@@ -592,6 +778,8 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                 message += " Thinking tokens used the rest of the cap and were omitted from the visible output count."
             raise ProviderError(message, usage=reported_usage)
         if profile["kind"] == "openai_responses":
+            if data.get("status") in ("failed", "incomplete"):
+                raise incomplete(f"Responses API call ended with status {data['status']}.", data, reported_usage)
             if data.get("status") != "completed" or not isinstance(data.get("output"), list):
                 raise ProviderError("Responses API call did not complete.", usage=reported_usage)
             items = data["output"]
@@ -619,6 +807,10 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             calls = [{"id": b["id"], "type": "function", "function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
                      for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
         else:
+            choices = data.get("choices")
+            if choices == [] or isinstance(choices, list) and isinstance(choices[0], dict) and choices[0].get("message") is None:
+                # OpenRouter does this when the model behind it fails: no reply to work with.
+                raise incomplete("The provider answered without a reply.", data, reported_usage)
             original = data["choices"][0]["message"]
             if not isinstance(original, dict):
                 raise TypeError("message must be an object")

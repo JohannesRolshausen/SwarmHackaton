@@ -124,11 +124,13 @@ class WireExchange:
     def received(self, status, reason, headers, raw):
         self._outcome(f"{status} {reason or ''}".strip(), headers, raw)
 
-    def http_error(self, exc):
-        try:
-            raw = exc.read(4_000_001)
-        except Exception:
-            raw = None
+    def http_error(self, exc, raw=b""):
+        """``raw`` is the error body when the caller already read it; the body can be read only once."""
+        if raw == b"":
+            try:
+                raw = exc.read(4_000_001)
+            except Exception:
+                raw = None
         self._outcome(f"HTTP error {exc.code} {exc.reason or ''}".strip(), exc.headers, raw)
 
     def failed(self, kind, exc):

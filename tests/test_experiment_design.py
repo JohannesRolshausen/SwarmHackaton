@@ -252,6 +252,28 @@ class ExperimentDesignTests(unittest.TestCase):
         plain.action("agent_02", "post_note", {"content": "Offer 120."})
         self.assertRegex(plain.action("agent_01", "read_board", {})["messages"][0]["time"], r"^\d\d:\d\d$")
 
+    def test_live_call_after_reading_a_board_with_channel_history(self):
+        # The history messages have no id, so the next request must not fail when it counts peer exposure.
+        design = json.loads((ROOT / "designs/group-spending-baseline.json").read_text(encoding="utf-8"))
+        self.assertTrue(design["world"]["board_history"])
+        design["rules"]["board_delivery"] = "tool_only"  # Exposure then comes only from the read_board result.
+        models = {a["agent_id"]: "fake" for a in expand(validate_design(design))}
+        run = self.run_design(design, mode="live", models=models)
+        run.state["provider_profiles"] = {a: {"kind": "fake"} for a in run.agents}
+        run._provider_keys = {a: "" for a in run.agents}
+        reader, peer = run.agents[0], run.agents[1]
+        run.action(peer, "post_note", {"content": "Budget looks fine."})
+        replies = iter([{"role": "assistant", "content": "", "tool_calls": [call("read_board", {}, "r1")]},
+                        {"role": "assistant", "content": "Noted."}])
+        def responder(profile, key, messages, tools, *args):
+            return next(replies), {"input_tokens": 4, "output_tokens": 2}
+        with patch("swarm_bench.lab_engine.completion", responder):
+            run.live_call(reader)
+            run.live_call(reader)
+        requests = [e for e in run.state["events"] if e["kind"] == "model_request" and e["agent_id"] == reader]
+        self.assertEqual([e["exposed_note_ids"] for e in requests], [[], [1]])
+        self.assertNotIn(run.state["status"], ("failed", "error"))
+
     def test_run_config_follows_the_design_not_the_form(self):
         config = validate_config({"scenario": "designed", "design": deal_design(), "agent_count": 9,
                                   "answer_policy": "plurality", "restricted": [], "board_delivery": "auto",

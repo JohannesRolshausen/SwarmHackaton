@@ -301,7 +301,7 @@ LOG_KINDS = {
     "operator_pause", "operator_stop", "agent_finished", "arc_initial", "arc_action",
     "continuation_requested", "token_limit", "budget_limit", "model_error", "retry_scheduled",
     "board_message_limit_reached", "order_placed", "order_deadline", "order_reminder",
-    "custom_action", "controller_message",
+    "custom_action", "controller_message", "round_order", "service_tier_fallback", "run_stopped_after_agent_error",
 }
 
 
@@ -381,9 +381,28 @@ def event_line(event):
         if event.get("ends_run"):
             text += " · ends the run"
     elif kind == "controller_message":
-        text = who + f"receives a controller message after {event.get('note_count')} board messages"
+        text = who + (f"receives a controller message after {event['rounds_completed']} rounds "
+                      f"({event.get('note_count')} board messages)" if event.get("rounds_completed")
+                      else f"receives a controller message after {event.get('note_count')} board messages")
     elif kind == "retry_scheduled" and event.get("reason") == "rate_limit":
         text = who + f"waits {event.get('delay_seconds', 60)}s after a rate limit"
+    elif kind == "retry_scheduled" and event.get("reason") == "timeout":
+        text = who + f"waits {event.get('delay_seconds', 30)}s after a timeout, then tries again"
+    elif kind == "retry_scheduled" and event.get("reason") in ("network", "server_error", "incomplete"):
+        what = {"network": "a network error", "server_error": "a server error",
+                "incomplete": "an answer without a reply"}[event.get("reason")]
+        text = who + f"waits {event.get('delay_seconds', 30)}s after {what}, then tries again"
+    elif kind == "run_stopped_after_agent_error":
+        text = who + "failed for good: the run ends with an error"
+    elif kind == "retry_scheduled" and event.get("reason") == "action_required":
+        text = who + f"waits {event.get('delay_seconds', 60)}s: no credit or a spend limit reached"
+    elif kind == "retry_scheduled" and event.get("reason") == "flex_unavailable":
+        text = who + f"waits {event.get('delay_seconds', 60)}s: Flex had no capacity"
+    elif kind == "round_order":
+        text = f"Round {event.get('round')}: the others speak in the order " + ", ".join(
+            agent_label(a) for a in event.get("order") or [])
+    elif kind == "service_tier_fallback":
+        text = who + "sends one call with standard processing after Flex had no capacity twice"
     elif kind == "token_limit":
         text = who + "reaches the token budget"
     elif kind == "budget_limit":

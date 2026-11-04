@@ -314,6 +314,14 @@ def validate_design(raw):
     channel = _text(world.get("channel"), "Channel name", 100).strip()
     start_time = _world_time(world["start_time"], "world.start_time") if world.get("start_time") else None
     board_history = _board_history(world.get("board_history"), start_time, use_handles)
+    gap = world.get("message_gap_minutes")
+    if gap is not None:
+        if (not isinstance(gap, list) or len(gap) != 2
+                or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 1440 for v in gap) or gap[0] > gap[1]):
+            raise ValueError("world.message_gap_minutes must be [shortest, longest], whole minutes from 0 to 1,440")
+        if not start_time:
+            raise ValueError("world.message_gap_minutes needs a world.start_time")
+        gap = list(gap)
     custom = raw.get("custom_tools") or []
     if not isinstance(custom, list) or len(custom) > 12:
         raise ValueError("At most 12 custom tools")
@@ -353,7 +361,17 @@ def validate_design(raw):
              "answer_policy": _choice(rules_raw.get("answer_policy"), "Collective answer", ("none", "plurality", "leader"), "none"),
              "idle_policy": _choice(rules_raw.get("idle_policy"), "When agents stop acting", ("finish", "continue"), "finish"),
              "idle_wait_seconds": _integer(rules_raw.get("idle_wait_seconds"), "Wait before continuation", 0, 60, 2),
-             "stop_on_breach": _flag(rules_raw.get("stop_on_breach"), "Stop at the first breach")}
+             "stop_on_breach": _flag(rules_raw.get("stop_on_breach"), "Stop at the first breach"),
+             "turn_order": _choice(rules_raw.get("turn_order"), "Turn order", ("free", "rounds"), "free"),
+             "stop_on_agent_error": _flag(rules_raw.get("stop_on_agent_error"), "Stop the run when an agent fails")}
+    if rules["turn_order"] == "rounds":
+        lead = next((r for r in roles if r["leader"]), None)
+        if lead is None or lead["count"] != 1:
+            raise ValueError("Rounds need a leading role with exactly one agent: the leader speaks, then each other agent once")
+        if total < 2:
+            raise ValueError("Rounds need at least two agents")
+        if rules["idle_policy"] != "finish":
+            raise ValueError("Rounds end the run when the agents stop acting; choose idle_policy finish")
     if rules["answer_policy"] == "leader" and not any(r["leader"] for r in roles):
         raise ValueError("The collective answer is the leader's, but no role leads")
     run_raw = raw.get("run_defaults") or {}
@@ -381,7 +399,12 @@ def validate_design(raw):
         missing = [t for t in targets if t not in role_ids]
         if missing:
             raise ValueError(f"Controller message {i}: unknown role {missing[0]!r}")
-        messages.append({"after_notes": _integer(item.get("after_notes"), f"Controller message {i}: after board messages", 1, 100000, 10),
+        after_rounds = _integer(item.get("after_rounds"), f"Controller message {i}: after rounds", 1, 1000, optional=True)
+        if after_rounds is not None and rules["turn_order"] != "rounds":
+            raise ValueError(f"Controller message {i}: after_rounds needs rules.turn_order rounds")
+        messages.append({"after_notes": None if after_rounds is not None else
+                         _integer(item.get("after_notes"), f"Controller message {i}: after board messages", 1, 100000, 10),
+                         "after_rounds": after_rounds,
                          "to_roles": list(targets),
                          "content": _text(item.get("content"), f"Controller message {i}", 6000, True).strip(),
                          "stop_others": _flag(item.get("stop_others"), f"Controller message {i}: stop the other roles")})
@@ -395,7 +418,7 @@ def validate_design(raw):
               "name": _text(raw.get("name"), "Design name", 150, True).strip(),
               "description": _text(raw.get("description"), "Description", 8000).strip(),
               "world": {"use_handles": use_handles, "channel": channel, "start_time": start_time,
-                        "board_history": board_history},
+                        "board_history": board_history, "message_gap_minutes": gap},
               "task": _text(raw.get("task"), "Shared task", 20000, True).strip(),
               "shared_prompt": _text(raw.get("shared_prompt"), "Shared prompt", 16000).strip(),
               "shared_files": _files(raw.get("shared_files"), "Shared files"),

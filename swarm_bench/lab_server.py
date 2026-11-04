@@ -18,6 +18,8 @@ from .common import ROOT, read_json, write_json
 from .experiment_design import DESIGNS_DIR, DesignStore
 from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ALTRUISM_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, DESIGNED, LabRun, agent_text_defaults, assemble_prompt, is_segment
 from .lab_storage import atomic_json, load_run, save_run
+from .leader_signals import COLUMNS as LEADER_SIGNAL_COLUMNS, leader_columns
+from .error_help import package_help, request_help, run_issues
 from .pdf_export import render_run_pdf
 from .providers import ProviderError, ProviderRegistry, load_local_env
 
@@ -46,7 +48,8 @@ def unique_experiment_title(title, existing_titles):
         n += 1
 
 
-AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd")
+AGENT_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cost_usd",
+                    "service_tiers", "served_providers")
 
 
 def light_config(config):
@@ -56,6 +59,7 @@ def light_config(config):
     light = {k: v for k, v in config.items() if k not in ("design", "design_agents", "workspace_files")}
     design = config.get("design") or {}
     light["design"] = {"id": design.get("id", ""), "name": design.get("name", "")}
+    light["turn_order"] = (design.get("rules") or {}).get("turn_order", "free")
     light["design_agents"] = {a: {k: row.get(k) for k in ("role", "role_name", "handle", "forbidden_files", "start_after")}
                               for a, row in (config.get("design_agents") or {}).items()}
     return light
@@ -174,9 +178,12 @@ class LabManager:
                 snapshot["worker_active"] = bool(self.workers.get(run_id) and self.workers[run_id].is_alive())
                 if snapshot["worker_active"] and snapshot["status"] == "paused":
                     snapshot["status"] = "running"
+                snapshot["issues"] = run_issues(snapshot)
                 return snapshot
             if run_id in self.archives:
-                return copy.deepcopy(self.archives[run_id])
+                snapshot = copy.deepcopy(self.archives[run_id])
+                snapshot["issues"] = run_issues(snapshot)
+                return snapshot
             raise ValueError("Unknown experiment")
 
     def inspect(self, run_id, agent):
@@ -313,12 +320,24 @@ class LabManager:
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
                   "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
-                  "tested_models", "peer_models", "leader_model"]
+                  "tested_models", "peer_models", "leader_model", "turn_order", "rounds_completed", "round_orders",
+                  "leader_notes", "leader_service_tiers", "leader_served_providers", "others_served_providers"]
         # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
         split_keys = (("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
                       ("cache_read_input_tokens", "cache_read_tokens"), ("cache_creation_input_tokens", "cache_write_tokens"),
                       ("cost_usd", "cost_usd"))
         fields += [f"{side}_{name}" for side in ("leader", "others") for _, name in split_keys]
+        # Did the leader know the limit before the order, how far the talk had come, and test words in its text.
+        fields += list(LEADER_SIGNAL_COLUMNS)
+        def leader_signals(r):
+            with self.lock:
+                run = self.runs.get(r["id"])
+                if run is not None:
+                    with run.lock:
+                        return leader_columns(run.state, run.histories)
+                if r["id"] in self.archives:
+                    return leader_columns(self.archives[r["id"]], self.archive_histories.get(r["id"]))
+            return dict.fromkeys(LEADER_SIGNAL_COLUMNS, "")
         def token_split(r):
             leader, per_agent = r["config"].get("leader"), r.get("agent_usage") or {}
             row = {}
@@ -327,7 +346,29 @@ class LabManager:
                 for key, name in split_keys:
                     values = [per_agent[a][key] for a in agents if key in per_agent[a]]
                     row[f"{side}_{name}"] = (round(sum(values), 6) if key == "cost_usd" else sum(values)) if values else ""
+            # Calls per service tier as the provider reported it, e.g. "default:1 flex:11" (OpenAI) or
+            # "flex:11 standard:1" (Gemini). Empty for other providers.
+            tiers = (per_agent.get(leader) or {}).get("service_tiers") or {}
+            row["leader_service_tiers"] = " ".join(f"{k}:{v}" for k, v in sorted(tiers.items()))
+            # Calls per provider behind OpenRouter, e.g. "DeepInfra:41". Empty for direct providers.
+            for side, agents in (("leader", [a for a in per_agent if a == leader]),
+                                 ("others", [a for a in per_agent if a != leader])):
+                served = {}
+                for agent in agents:
+                    for name, count in (per_agent[agent].get("served_providers") or {}).items():
+                        served[name] = served.get(name, 0) + count
+                row[f"{side}_served_providers"] = " ".join(f"{k}:{v}" for k, v in sorted(served.items()))
             return row
+        def round_columns(r):
+            m, c = r.get("metrics") or {}, r["config"]
+            rounds = m.get("rounds")
+            names = {a: (s.get("handle") or a) for a, s in ((c.get("design_agents") or {}).items())}
+            leader_notes = ((m.get("agents") or {}).get(c.get("leader")) or {}).get("note_count", "")
+            return {"turn_order": c.get("turn_order", "free" if c.get("design") else ""),
+                    "rounds_completed": rounds["completed"] if rounds else "",
+                    # One group per round, in speaking order after the leader: "Jonas, Miriam | Sandra, Jonas".
+                    "round_orders": " | ".join(", ".join(names.get(a, a) for a in order) for order in rounds["orders"]) if rounds else "",
+                    "leader_notes": leader_notes if c.get("leader") else ""}
         # One column per custom tool parameter, such as set_spending.amount, with the value of the tool's last call.
         def last_arguments(m):
             last = {}
@@ -374,7 +415,7 @@ class LabManager:
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
                              "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))
                              if c["leader"] else "",
-                             **token_split(r),
+                             **token_split(r), **round_columns(r), **leader_signals(r),
                              **last_arguments(m), **measure_columns(m)})
         return buffer.getvalue()
 
@@ -573,7 +614,8 @@ class LabManager:
         statuses = [self._run_status(rid) for rid in record["run_ids"]]
         return {**{k: copy.deepcopy(v) for k, v in record.items() if k != "config"},
                 "config": copy.deepcopy(record["config"]), "worker_active": self._series_active(record["id"]),
-                "finished_count": sum(s in _FINISHED for s in statuses)}
+                "finished_count": sum(s in _FINISHED for s in statuses),
+                **({"error_help": package_help(record["error"])} if record.get("error") else {})}
 
     def series_list(self):
         with self.lock:
@@ -857,7 +899,8 @@ def make_lab_server(manager, port=8766):
                 else:
                     self.send(404, {"error": "Unknown route"})
             except (ValueError, TypeError, KeyError, ProviderError) as exc:
-                self.send(400, {"error": str(exc)})
+                hint = request_help(str(exc))
+                self.send(400, {"error": str(exc), **({"help": hint} if hint else {})})
             except OSError as exc:
                 if isinstance(exc, _CLIENT_DISCONNECTED) or getattr(exc, "winerror", None) == 10053:
                     return

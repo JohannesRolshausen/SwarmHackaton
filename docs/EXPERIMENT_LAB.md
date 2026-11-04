@@ -27,7 +27,7 @@ A design never holds model profiles or API keys. Each run stores a frozen copy o
 | `custom_tools[]` | Action tools without code. |
 | `controller_messages[]` | Messages from outside the group after a number of board messages. |
 | `measures[]` | Limits checked against custom tool calls, for analysis. Never sent to a model. |
-| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md). |
+| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)) and `stop_on_agent_error` (see the table below). |
 | `run_defaults` | `call_limit`, `max_output_tokens`, `total_output_tokens`, `temperature`, filled into the Experiment page; each run can change them. |
 
 ### Roles
@@ -78,6 +78,7 @@ An empty channel and real clock times give a run away as a simulation. Two optio
 ```
 
 - `start_time` (`YYYY-MM-DDTHH:MM`, local time, no time zone) is the world clock. `read_board` then shows every message with date and time: the run's first message is at `start_time`, and later ones follow by the real time elapsed since.
+- `message_gap_minutes` (`[shortest, longest]`, whole minutes, needs `start_time`) replaces the real time: each new message comes a random number of minutes in that range after the previous one. The time is stored on the note (`world_at`). Use it when providers answer at very different speeds, so a slow provider or a long wait leaves no gap in the channel.
 - `board_history` holds up to 50 messages from before the run, oldest first and all before `start_time`. `from` is any name (60 characters), `content` up to 6,000 characters; placeholders are not filled. `read_board` shows them first, without an `id`. They are not run notes: they are not pushed, not counted for `after_notes` or `board_message_limit`, not in the metrics, and not peer exposure. History needs handles on and a `start_time`.
 
 The Lab has no editor for these fields; write them in the JSON file. The Lab keeps them when it saves. The run view and the PDF show the run's own messages only.
@@ -128,9 +129,20 @@ The CSV has three columns per measure: `<name>.class`, `<name>.over_by` (the amo
 
 The Lab has no editor for measures; write them in the JSON file. The Lab keeps them when it saves and updates them when their tool is renamed. A run keeps the measures of its frozen design, so runs created before a measure was added have none.
 
+## Turn order
+
+`rules.turn_order` is `free` (default) or `rounds`.
+
+- `free`: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers: thinking time, rate limits, timeouts and queues all change the conversation.
+- `rounds`: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts a message or answers without a tool call. Tool calls before that (reading files, checking the budget) belong to the same turn. Waiting for a provider (rate limit, timeout, Flex without capacity) keeps the turn, so slow providers change nothing in the conversation. An agent that fails for good or reaches its call limit is skipped. When only the leader can still act, for example after a controller message with `stop_others`, the leader acts as in a free run. A turn that starts with nothing new to answer gets the channel's continuation prompt, so the provider always receives a user turn.
+
+Rounds need a leading role with exactly one agent and `idle_policy` `finish`. The order of each round comes from the operating system's random source (`random.SystemRandom`), not from the run seed, so runs with the same seed still draw their own orders. Every order is stored in the run (`rounds.orders` in `state.json`, events `round_order` and `round_completed`) and exported as the CSV column `round_orders`.
+
 ## Controller messages
 
 `after_notes` board messages after the start, every agent of the roles in `to_roles` receives `content` as a user message with its next request (event `controller_message`). Each message is sent once. With `stop_others`, agents of the other roles stop; requests already in flight still land. An agent that has already stopped or reached its call limit does not receive it.
+
+With turn order `rounds`, `after_rounds` replaces `after_notes`: the message is sent once that many rounds are complete, that is after the last other agent of that round, and reaches the leader with its next request.
 
 ## Limits
 
@@ -164,6 +176,7 @@ Everything else is optional.
 | `world.channel` | `""`, shown as `shared channel` | text, 100 characters |
 | `world.start_time` | `null` (time of day only) | `null` or a time such as `2026-10-12T09:30` |
 | `world.board_history` | `[]` | up to 50 messages `{from, at, content}` in time order before `start_time`; needs handles and `start_time` |
+| `world.message_gap_minutes` | `null` (real time elapsed) | `null` or `[shortest, longest]`, 0–1,440 minutes; needs `start_time` |
 | `roles[].count` | `1` | 1–32; all roles together at most 32 |
 | `roles[].handle` | role id, plus `-{n}` when `count` > 1 | one line, 60 characters, unique per agent with handles on |
 | `roles[].tools` | `list_files`, `read_file`, `read_board`, `post_note`, `submit_answer` | built-in tools (`list_files`, `read_file`, `create_file`, `edit_file`, `read_board`, `post_note`, `submit_answer`, `run_python`) and the names of the design's custom tools |
@@ -176,7 +189,8 @@ Everything else is optional.
 | `custom_tools[].parameters[].required` | `true` | `true`, `false` |
 | `custom_tools[].response` | `Done.` | text, 4,000 characters |
 | `custom_tools[].breach`, `ends_run` | `false` | `true`, `false` |
-| `controller_messages[].after_notes` | `10` | 1–100,000 |
+| `controller_messages[].after_notes` | `10` | 1–100,000; `null` when `after_rounds` is set |
+| `controller_messages[].after_rounds` | `null` | `null` or 1–1,000; needs `rules.turn_order` `rounds` |
 | `controller_messages[].stop_others` | `false` | `true`, `false` |
 | `measures[].disclosure_parameter` | `null` | `null` or a `string` parameter of the measured tool |
 | `measures[].disclosure_terms` | `[]` | up to 50 texts of 100 characters; needed with a disclosure parameter |
@@ -187,6 +201,8 @@ Everything else is optional.
 | `rules.idle_policy` | `finish` | `finish`, `continue` |
 | `rules.idle_wait_seconds` | `2` | 0–60 |
 | `rules.stop_on_breach` | `false` | `true`, `false` |
+| `rules.turn_order` | `free` | `free`, `rounds` (needs a leading role with one agent and `idle_policy` `finish`) |
+| `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) count as failing only after 30 minutes in a row without a successful answer. |
 | `run_defaults.call_limit` | `24` | 1–500 |
 | `run_defaults.max_output_tokens` | `16000` | 128–400,000 |
 | `run_defaults.total_output_tokens` | `1500000` | 128–1,000,000,000 |

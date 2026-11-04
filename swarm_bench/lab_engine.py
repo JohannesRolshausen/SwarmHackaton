@@ -8,14 +8,14 @@ import re
 import threading
 from time import monotonic, sleep
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
 
 from . import experiment_design, gpu_procurement, segment_report
 from .common import ROOT, number, read_json, write_json
 from .lab_storage import save_run
-from .providers import ProviderError, completion
+from .providers import ProviderError, completion, is_wait_status
 from .wire_log import WireLog
 
 DEFAULT_RESTRICTION = "don't access files"
@@ -54,7 +54,58 @@ SOLO_IMPORTANCE = {
 
 def _is_rate_limit(exc):
     diagnostic = getattr(exc, "diagnostic", None) or {}
+    if diagnostic.get("action_required"):
+        return False  # No credit or a spend limit: waiting does not help.
     return diagnostic.get("http_status") == 429 or diagnostic.get("provider_error_code") == 429
+
+
+def _is_timeout(exc):
+    return "timeout_seconds" in (getattr(exc, "diagnostic", None) or {})
+
+
+def _is_action_required(exc):
+    """No credit or a spend limit: only the operator can fix it."""
+    return bool((getattr(exc, "diagnostic", None) or {}).get("action_required"))
+
+
+def _is_server_error(diagnostic):
+    """HTTP 408 or any 5xx (529: Anthropic is overloaded, 520 to 524: Cloudflare), or an error without a code."""
+    return (diagnostic.get("unspecified_provider_error") is True or any(
+        code != 429 and is_wait_status(code) for code in (diagnostic.get("http_status"), diagnostic.get("provider_error_code"))))
+
+
+def _wait_reason(exc):
+    """Why a provider error only pauses the agent, or None when it is not a wait.
+
+    A wait is retried for up to WAIT_LIMIT_SECONDS and never uses the call limit: it says nothing about the model."""
+    diagnostic = getattr(exc, "diagnostic", None) or {}
+    if _is_action_required(exc):
+        return "action_required"
+    if diagnostic.get("flex_unavailable") and "http_status" in diagnostic:
+        return "flex_unavailable"  # OpenAI 429, Gemini 429 or 503. A Flex timeout stays a timeout.
+    if _is_rate_limit(exc):
+        return "rate_limit"
+    if _is_timeout(exc):
+        return "timeout"
+    if diagnostic.get("network_error") or diagnostic.get("invalid_json"):
+        return "network"
+    if _is_server_error(diagnostic):
+        return "server_error"
+    if diagnostic.get("incomplete_response"):
+        return "incomplete"
+    return None
+
+
+WAIT_SECONDS = {"action_required": 60, "rate_limit": 60, "flex_unavailable": 60, "timeout": 30, "network": 30,
+                "server_error": 60, "incomplete": 30}
+# How long an agent waits out provider errors in a row before it stops. Long enough for a rate limit wave, an outage
+# or adding credit. Short enough that a package left running overnight goes on with its next run.
+WAIT_LIMIT_SECONDS = 1800
+
+
+# The turn order in rounds and the gaps between channel times come from the operating system's random source.
+# The run seed plays no part, so runs with the same seed still draw their own. What was drawn is stored in the run.
+SYSTEM_RANDOM = random.SystemRandom()
 
 
 def tool(name, description, properties, required=()):
@@ -712,6 +763,7 @@ class LabRun:
         self.demo_memory = {a: {} for a in self.agents}
         self.agent_steps = {a: 0 for a in self.agents}
         self.continuing_tools = {a: True for a in self.agents}
+        self.flex_misses = {a: 0 for a in self.agents}  # Flex 429s and timeouts in a row; two switch one call to default.
         self.data_dir = Path(data_dir)
         self.gold = None
         self.accounts = {}
@@ -799,6 +851,10 @@ class LabRun:
                       "usage": {a: {"input_tokens": 0, "output_tokens": 0, "calls": 0,
                                     "successful_calls": 0, "failed_calls": 0, "usage_unavailable_calls": 0} for a in self.agents},
                       "question": self.question, "error": None, "run_type": "scripted_demo" if self.config["mode"] == "demo" else "live_models"}
+        if self.config["scenario"] == DESIGNED and self.config["design"]["rules"].get("turn_order") == "rounds":
+            # The leader speaks, then every other agent once in a fresh random order, then the leader again.
+            self.state["rounds"] = {"round": 1, "phase": "leader", "holder": self.config["leader"],
+                                    "order": [], "index": 0, "completed": 0, "orders": []}
         if self.accounts:
             self.state["accounts"] = copy.deepcopy(self.accounts)
         if is_segment(self.config["scenario"]):
@@ -833,13 +889,30 @@ class LabRun:
     def now():
         return datetime.now(timezone.utc).isoformat()
 
-    def board_time(self, at):
+    def board_time(self, note):
         """Time of a channel message as agents see it. With a world clock, the first message of the run is at
-        world.start_time and later ones follow by the real time elapsed since; without one, the time of day."""
+        world.start_time. Later ones follow by world.message_gap_minutes when the design sets it (stored on the
+        note), else by the real time elapsed since. Without a world clock, the time of day."""
+        if note.get("world_at"):
+            return note["world_at"].replace("T", " ")
         if self.world_start is None:
-            return at[11:16]
-        elapsed = datetime.fromisoformat(at) - datetime.fromisoformat(self.state["notes"][0]["at"])
+            return note["at"][11:16]
+        elapsed = datetime.fromisoformat(note["at"]) - datetime.fromisoformat(self.state["notes"][0]["at"])
         return (self.world_start + elapsed).strftime("%Y-%m-%d %H:%M")
+
+    def next_world_time(self):
+        """With world.message_gap_minutes, a random gap in that range after the previous message.
+
+        The gap does not depend on how long a model took, so a slow provider leaves no trace in the channel."""
+        gap = (self.config["design"]["world"].get("message_gap_minutes")
+               if self.config["scenario"] == DESIGNED and self.world_start is not None else None)
+        if not gap:
+            return None
+        previous = next((n["world_at"] for n in reversed(self.state["notes"]) if n.get("world_at")), None)
+        if previous is None:
+            return self.world_start.strftime(experiment_design.WORLD_TIME)
+        at = datetime.strptime(previous, experiment_design.WORLD_TIME) + timedelta(minutes=SYSTEM_RANDOM.randint(*gap))
+        return at.strftime(experiment_design.WORLD_TIME)
 
     def partition(self, spec):
         digest = hashlib.sha256(f"{self.config['task_id']}:{self.config['seed']}:{len(self.agents)}".encode()).hexdigest()
@@ -941,8 +1014,10 @@ class LabRun:
                 calls = {c["id"]: c["function"]["name"] for c in message.get("tool_calls", [])}
             elif message["role"] == "tool" and calls.get(message["tool_call_id"]) == "read_board":
                 result = json.loads(message["content"])
+                # Channel history from the design has no id: it is not a run note and not peer exposure.
                 exposed.update(n["id"] for n in result.get("notes", result.get("messages", []))
-                               if n.get("agent_id", n.get("from")) not in (agent, alias))
+                               if isinstance(n.get("id"), int) and not isinstance(n.get("id"), bool)
+                               and n.get("agent_id", n.get("from")) not in (agent, alias))
         return sorted(exposed)
 
     def deliver_pending_board_context(self, agent):
@@ -994,8 +1069,14 @@ class LabRun:
             return
         fired = self.state.setdefault("controller_fired", [])
         rows = self.config["design_agents"]
+        rounds_done = (self.state.get("rounds") or {}).get("completed", 0)
         for index, message in enumerate(self.config["design"]["controller_messages"]):
-            if index in fired or len(self.state["notes"]) < message["after_notes"]:
+            if index in fired:
+                continue
+            if message.get("after_rounds") is not None:
+                if rounds_done < message["after_rounds"]:
+                    continue
+            elif len(self.state["notes"]) < message["after_notes"]:
                 continue
             fired.append(index)
             targets = [a for a in self.agents if rows[a]["role"] in message["to_roles"]]
@@ -1003,7 +1084,7 @@ class LabRun:
                 content = rows[a]["controller_messages"][str(index)]
                 self.pending_controller[a].append({"role": "user", "content": content})
                 self.event("controller_message", a, origin="controller", index=index,
-                           note_count=len(self.state["notes"]), content=content)
+                           note_count=len(self.state["notes"]), rounds_completed=rounds_done, content=content)
             if message["stop_others"]:
                 for a in self.agents:
                     if a not in targets and self.state["agent_status"][a] not in ("error", "limit"):
@@ -1128,7 +1209,7 @@ class LabRun:
                     history = [{"from": h["from"], "time": h["at"].replace("T", " "), "content": h["content"]}
                                for h in self.board_history]
                     result = {"messages": history + [{"id": n["id"], "from": self.handles.get(n["agent_id"], n["agent_id"]),
-                                                      "time": self.board_time(n["at"]), "content": n["content"]}
+                                                      "time": self.board_time(n), "content": n["content"]}
                                                      for n in result["notes"]]}
                 if self.config["mode"] == "demo":
                     self.state["exposures"][agent] = retrieved  # Script receives this return value immediately.
@@ -1143,6 +1224,9 @@ class LabRun:
                 note = {"id": len(self.state["notes"]) + 1, "agent_id": agent, "at": self.now(),
                         "content": content,
                         "origin": "scripted_demo" if self.config["mode"] == "demo" else "model"}
+                world_at = self.next_world_time()
+                if world_at:
+                    note["world_at"] = world_at
                 self.state["notes"].append(note)
                 self.event("note_posted", agent, note_id=note["id"], **origin)
                 self._note_disclosure(agent, content, origin, decision, exclude_note_id=note["id"])
@@ -1290,10 +1374,78 @@ class LabRun:
         role = (rows.get(agent) or {}).get("start_after")
         return bool(role) and not any((rows.get(n["agent_id"]) or {}).get("role") == role for n in self.state["notes"])
 
+    def agent_live(self, agent):
+        return self.state["agent_status"][agent] not in ("done", "limit", "error", "stopped")
+
+    def rounds_on(self):
+        """Rounds hold while the leader and at least one other agent can still act. After that, for example
+        once a controller message has stopped the others, the leader acts as in a free run."""
+        if not self.state.get("rounds"):
+            return False
+        leader = self.config["leader"]
+        return self.agent_live(leader) and any(self.agent_live(a) for a in self.agents if a != leader)
+
+    def end_turn(self, agent):
+        """Pass the turn on. Caller holds the lock. A turn ends when the agent posts or answers without a tool."""
+        rounds = self.state.get("rounds")
+        if not self.rounds_on() or rounds["holder"] != agent:
+            return
+        leader = self.config["leader"]
+        while True:
+            if rounds["phase"] == "leader":
+                order = [a for a in self.agents if a != leader]
+                SYSTEM_RANDOM.shuffle(order)
+                rounds.update(phase="others", order=order, index=0)
+                rounds["orders"].append(list(order))
+                self.event("round_order", None, round=rounds["round"], order=order)
+            else:
+                rounds["index"] += 1
+            if rounds["index"] >= len(rounds["order"]):
+                rounds["completed"] += 1
+                self.event("round_completed", None, round=rounds["round"], note_count=len(self.state["notes"]))
+                rounds.update(round=rounds["round"] + 1, phase="leader", order=[], index=0, holder=leader)
+                self.check_controller_messages()
+                break
+            if self.agent_live(rounds["order"][rounds["index"]]):
+                rounds["holder"] = rounds["order"][rounds["index"]]
+                break
+        self.changed.notify_all()
+
+    def wait_for_turn(self, agent):
+        """Rounds: wait until it is this agent's turn. Caller holds the lock.
+
+        Returns "turn", "free" when rounds no longer hold, or "stop"."""
+        while self.rounds_on() and self.state["rounds"]["holder"] != agent:
+            if (self.pause_requested.is_set() or self.state["status"] in ("complete", "stopped", "error")
+                    or not self.agent_live(agent)):
+                return "stop"
+            self.state["agent_status"][agent] = "waiting"
+            self.finish_if_idle()
+            self.changed.wait(timeout=0.5)
+        if self.pause_requested.is_set() or not self.agent_live(agent):
+            return "stop"
+        if not self.agent_live(self.config["leader"]):
+            # Without the leader nobody decides: the others stop instead of talking on.
+            self.state["agent_status"][agent] = "done"
+            self.finish_if_idle()
+            return "stop"
+        if not self.rounds_on():
+            return "free"
+        if not self.continuing_tools[agent] and self.histories[agent][-1]["role"] == "assistant":
+            # A new turn with nothing new to answer, e.g. after a turn without a message. The provider needs a
+            # user turn to answer.
+            content = self.channel["continuation"] if self.channel else CONTINUATION_PROMPT
+            if self.config["mode"] == "live":
+                self.histories[agent].append({"role": "user", "content": content})
+            self.event("continuation_requested", agent, origin="controller", content=content)
+        return "turn"
+
     def finish_if_idle(self):
         """End a quiescent conversation, without adding any speaking-order barrier."""
         if self.pause_requested.is_set() or self.state["status"] in ("stopped", "complete"):
             return
+        if self.rounds_on() and self.agent_live(self.state["rounds"]["holder"]):
+            return  # Someone holds the turn and will act.
         if self.config["retain_after_submit"] and all(any(b["answer"] is not None for b in self.state["answers"][a]) for a in self.agents):
             self.state.update(status="complete", finish_reason="all_submitted")
             for a in self.agents:
@@ -1379,6 +1531,12 @@ class LabRun:
                         "cache_read_input_tokens", "cache_creation_input_tokens"):
                 if usage.get(key) is not None:
                     totals[key] = totals.get(key, 0) + usage[key]
+            if usage.get("service_tier"):
+                tiers = totals.setdefault("service_tiers", {})
+                tiers[usage["service_tier"]] = tiers.get(usage["service_tier"], 0) + 1
+            if usage.get("served_provider"):
+                served = totals.setdefault("served_providers", {})
+                served[usage["served_provider"]] = served.get(usage["served_provider"], 0) + 1
 
     def record_failure(self, agent, decision, exc, usage=None):
         with self.lock:
@@ -1412,6 +1570,14 @@ class LabRun:
             if agent not in self.remaining_agents():
                 raise ValueError("Call limit reached for this agent")
             profile = copy.deepcopy(self.state["provider_profiles"][agent])
+            if profile.get("service_tier") == "flex" and self.flex_misses[agent] >= 2:
+                # OpenAI's and Google's advice for Flex without capacity: retry with standard processing. Only this
+                # call; the next one tries Flex again. The model is the same, only price and wait differ.
+                # OpenAI calls the standard tier default. Gemini uses it when the field is left out.
+                standard = "default" if profile.get("kind") == "openai_responses" else ""
+                profile["service_tier"] = standard
+                self.flex_misses[agent] = 0
+                self.event("service_tier_fallback", agent, requested="flex", used=standard or "standard")
             key = self._provider_keys[agent]
             self.deliver_pending_board_context(agent)
             messages = copy.deepcopy(self.histories[agent])
@@ -1452,13 +1618,19 @@ class LabRun:
             if reserve is not None and usage is not None and usage.get("cost_usd") is not None:
                 with self.lock:
                     self.state["reserved_cost_usd"] += usage["cost_usd"] - reserve
-            if _is_rate_limit(exc):
-                # The provider rejected the call before any output. Give the attempt back.
+            if _wait_reason(exc):
+                # A rejected call never reached the model. A timed-out or failed one says nothing about the model
+                # either. Give the attempt back, so waiting for the provider never uses up the call limit.
                 self.release_rate_limit_attempt(agent, output_budget, usage)
+            if (getattr(exc, "diagnostic", None) or {}).get("flex_unavailable"):
+                with self.lock:
+                    # A Flex timeout switches at once, a Flex 429 at the second in a row.
+                    self.flex_misses[agent] = 2 if _is_timeout(exc) else self.flex_misses[agent] + 1
             self.record_failure(agent, decision, exc, getattr(exc, "usage", None))
             raise
         self.wait_for_account_api(agent, [c.get("function", {}).get("name", "") for c in msg.get("tool_calls", [])])
         with self.lock:
+            self.flex_misses[agent] = 0
             self.settle_tokens(output_budget, usage)
             if reserve is not None and usage is not None and usage.get("cost_usd") is not None:
                 self.state["reserved_cost_usd"] += usage["cost_usd"] - reserve
@@ -1554,8 +1726,8 @@ class LabRun:
         if self.awaiting_order(agent):
             return True  # After the deadline the buyer acts until it orders or its final requests run out.
         posted_note = len(self.state["notes"]) > len(previous_state["notes"])
-        if posted_note and self.config.get("wait_for_peer_after_post"):
-            return False
+        if posted_note and (self.config.get("wait_for_peer_after_post") or self.state.get("rounds")):
+            return False  # In rounds, posting ends the turn.
         return bool(calls) or (self.config["submit_only"] and not self.state["answers"][agent])
 
     def wait_for_account_api(self, agent, tool_names):
@@ -1595,6 +1767,7 @@ class LabRun:
 
     def agent_loop(self, agent):
         consecutive_failures = 0
+        waiting_since = None  # When the current series of provider waits began. A successful call resets it.
         try:
             while not self.pause_requested.is_set():
                 with self.changed:
@@ -1602,10 +1775,14 @@ class LabRun:
                         break
                     count = self.state["usage"][agent]["calls"] if self.config["mode"] == "live" else self.agent_steps[agent]
                     if count >= self.config["call_limit"] or self.final_calls_used(agent):
+                        self.end_turn(agent)
                         self.state["agent_status"][agent] = "limit"
                         self.finish_if_idle()
                         break
-                    if not self.continuing_tools[agent] or self.waiting_to_start(agent):
+                    gate = self.wait_for_turn(agent) if self.state.get("rounds") else "free"
+                    if gate == "stop":
+                        return
+                    if gate == "free" and (not self.continuing_tools[agent] or self.waiting_to_start(agent)):
                         self.state["agent_status"][agent] = "waiting"
                         deadline = monotonic() + self.config["idle_wait_seconds"]
                         continued = False
@@ -1648,16 +1825,28 @@ class LabRun:
                     else:
                         try:
                             self.continuing_tools[agent] = self.live_call(agent)
-                            consecutive_failures = 0
+                            consecutive_failures, waiting_since = 0, None
+                            if not self.continuing_tools[agent] and self.state.get("rounds"):
+                                with self.changed:
+                                    self.end_turn(agent)
                         except ProviderError as exc:
-                            if _is_rate_limit(exc):
-                                # Spread retries so ten agents do not wake on the same second.
-                                delay = 60 + self.agents.index(agent) * 5
+                            reason = _wait_reason(exc)
+                            if reason:
+                                waiting_since = waiting_since or monotonic()
+                                if monotonic() - waiting_since >= WAIT_LIMIT_SECONDS:
+                                    still = "Still refused" if reason == "action_required" else "Still failing"
+                                    raise ProviderError(
+                                        f"{exc} {still} after {WAIT_LIMIT_SECONDS // 60} minutes. This agent stops.",
+                                        diagnostic={**(exc.diagnostic or {}), "gave_up_after_wait": reason}) from None
+                            if reason:
+                                # Waiting for the provider pauses the run. Spread retries so ten agents
+                                # do not wake on the same second. In rounds the turn stays with this agent.
+                                delay = WAIT_SECONDS[reason] + self.agents.index(agent) * 5
                                 with self.changed:
                                     self.state["agent_status"][agent] = "rate_limited"
                                     if agent in self.state["active_agents"]:
                                         self.state["active_agents"].remove(agent)
-                                    self.event("retry_scheduled", agent, delay_seconds=delay, reason="rate_limit")
+                                    self.event("retry_scheduled", agent, delay_seconds=delay, reason=reason)
                                     self.persist()
                                     self.changed.notify_all()
                                 self.continuing_tools[agent] = True
@@ -1679,9 +1868,22 @@ class LabRun:
         except Exception as exc:
             with self.changed:
                 message = str(exc) if isinstance(exc, (ProviderError, ValueError)) else "Internal execution error"
+                self.end_turn(agent)
                 self.state["agent_status"][agent] = "error"
                 self.state["error"] = message
-                self.event("error", agent, message=message)
+                # The diagnostic and the profile let the interface explain the error next to the message.
+                self.event("error", agent, message=message, diagnostic=copy.deepcopy(getattr(exc, "diagnostic", None) or {}),
+                           provider=copy.deepcopy(self.state.get("provider_profiles", {}).get(agent)))
+                if (self.config["scenario"] == DESIGNED and self.config["design"]["rules"].get("stop_on_agent_error")
+                        and self.state["status"] not in ("complete", "stopped")):
+                    # Going on with one agent fewer would measure a different setup. End the run as a technical
+                    # failure, so it is restarted instead of counted.
+                    self.state.update(status="error", finish_reason="agent_error")
+                    for other in self.agents:
+                        if other != agent and self.state["agent_status"][other] not in ("error", "done", "limit"):
+                            self.state["agent_status"][other] = "stopped"
+                    self.event("run_stopped_after_agent_error", agent)
+                    self.pause_requested.set()
                 self.finish_if_idle()
                 self.changed.notify_all()
         finally:
@@ -1771,6 +1973,8 @@ class LabRun:
                 "answer_coverage": sum(v is not None for v in latest.values()) / len(self.agents),
                 "first_breach": min(breaches.values(), key=lambda r: r["id"]) if breaches else None,
                 "order": order,
+                "rounds": ({"completed": self.state["rounds"]["completed"],
+                            "orders": copy.deepcopy(self.state["rounds"]["orders"])} if self.state.get("rounds") else None),
                 "custom_actions": ([{key: e.get(key) for key in ("id", "agent_id", "tool", "arguments", "restricted",
                                                                  "ends_run", "exposed_note_ids")}
                                     for e in self.state["events"] if e.get("kind") == "custom_action"]
