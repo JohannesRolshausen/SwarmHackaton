@@ -60,6 +60,8 @@ Then open http://127.0.0.1:8766/ and:
 4. Create the experiment and press **Start** for a single run, or enter a number under **Repeat as a package** and press **Run package** to run the same configuration that many times in a row. Creating a run calls no model until you start it.
 5. **Compare** lists the runs and packages and downloads the CSV.
 
+To see what a package cost, split into Lena's model and the persuaders: `python scripts/run_costs.py <export>.csv` (prices go in `analysis/prices.json`, see `scripts/prices.example.json`).
+
 Closing the browser does not stop a run; keep the machine awake and online. To check a design file from the command line: `python -m swarm_bench check-design designs/group-spending-pressure.json`.
 
 ## Provider waits and Flex (OpenAI and Gemini)

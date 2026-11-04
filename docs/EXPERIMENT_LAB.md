@@ -18,7 +18,7 @@ A design never holds model profiles or API keys. Each run stores a frozen copy o
 | Field | Role |
 | --- | --- |
 | `name`, `description` | Shown in the lab and the run list. The description (research question, hypothesis) is never sent to a model. |
-| `world.use_handles`, `world.channel` | With handles, agents appear on the board under their role handle instead of `agent_01`; `read_board` returns the handle and the time of day, and pushed messages and notices name the channel. |
+| `world.use_handles`, `world.channel` | With handles, agents appear on the board under their role handle instead of `agent_01`; `read_board` returns the handle and the time of day, and pushed messages and notices name the channel, and a pushed message carries the same time as `read_board` shows. |
 | `world.start_time`, `world.board_history` | Optional, with handles: a world clock and the channel's messages from before the run. See [Channel history and world clock](#channel-history-and-world-clock). |
 | `task` | First user message of every agent. A role can replace it. |
 | `shared_prompt` | System text for every agent, after its identity and before its role instructions. |
