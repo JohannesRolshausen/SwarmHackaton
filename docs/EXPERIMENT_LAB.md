@@ -27,7 +27,7 @@ A design never holds model profiles or API keys. Each run stores a frozen copy o
 | `custom_tools[]` | Action tools without code. |
 | `controller_messages[]` | Messages from outside the group after a number of board messages. |
 | `measures[]` | Limits checked against custom tool calls, for analysis. Never sent to a model. |
-| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)) and `stop_on_agent_error` (see the table below). |
+| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)), `stop_on_agent_error` and `post_reminder` (see the table below). |
 | `run_defaults` | `call_limit`, `max_output_tokens`, `total_output_tokens`, `temperature`, filled into the Experiment page; each run can change them. |
 
 ### Roles
@@ -134,13 +134,13 @@ The Lab has no editor for measures; write them in the JSON file. The Lab keeps t
 `rules.turn_order` is `free` (default) or `rounds`.
 
 - `free`: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers: thinking time, rate limits, timeouts and queues all change the conversation.
-- `rounds`: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts a message or answers without a tool call. Tool calls before that (reading files, checking the budget) belong to the same turn. Waiting for a provider (rate limit, timeout, Flex without capacity) keeps the turn, so slow providers change nothing in the conversation. An agent that fails for good or reaches its call limit is skipped. When only the leader can still act, for example after a controller message with `stop_others`, the leader acts as in a free run. A turn that starts with nothing new to answer gets the channel's continuation prompt, so the provider always receives a user turn.
+- `rounds`: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts a message or answers without a tool call (a colleague first gets one reminder per turn if `rules.post_reminder` is set). Tool calls before that (reading files, checking the budget) belong to the same turn. Waiting for a provider (rate limit, timeout, Flex without capacity, an empty reply) keeps the turn, so slow providers change nothing in the conversation. `start_after` holds here too: a leader whose first message all the others wait for keeps the turn until it posts, gets the channel's continuation prompt after an answer without a tool, and no round begins before that. If it reaches its call limit first, the others never start and the run ends with `finish_reason` `call_limit`. The leading role cannot have a `start_after` itself. An agent that fails for good or reaches its call limit is skipped. When only the leader can still act, for example after a controller message with `stop_others`, the leader acts as in a free run. A turn that starts with nothing new to answer gets the channel's continuation prompt, so the provider always receives a user turn.
 
 Rounds need a leading role with exactly one agent and `idle_policy` `finish`. The order of each round comes from the operating system's random source (`random.SystemRandom`), not from the run seed, so runs with the same seed still draw their own orders. Every order is stored in the run (`rounds.orders` in `state.json`, events `round_order` and `round_completed`) and exported as the CSV column `round_orders`.
 
 ## Controller messages
 
-`after_notes` board messages after the start, every agent of the roles in `to_roles` receives `content` as a user message with its next request (event `controller_message`). Each message is sent once. With `stop_others`, agents of the other roles stop; requests already in flight still land. An agent that has already stopped or reached its call limit does not receive it.
+`after_notes` board messages after the start, every agent of the roles in `to_roles` receives `content` as a user message with its next request (event `controller_message`). Each message is sent once. With `stop_others`, agents of the other roles stop; requests already in flight still land. An agent that has already stopped or reached its call limit does not receive it. With `final_calls`, a recipient gets at most this many more successful model calls and then stops without being told (event `final_calls_used`, `finish_reason` `call_limit` once nobody else is active).
 
 With turn order `rounds`, `after_rounds` replaces `after_notes`: the message is sent once that many rounds are complete, that is after the last other agent of that round, and reaches the leader with its next request.
 
@@ -192,6 +192,7 @@ Everything else is optional.
 | `controller_messages[].after_notes` | `10` | 1–100,000; `null` when `after_rounds` is set |
 | `controller_messages[].after_rounds` | `null` | `null` or 1–1,000; needs `rules.turn_order` `rounds` |
 | `controller_messages[].stop_others` | `false` | `true`, `false` |
+| `controller_messages[].final_calls` | `null` | `null` or 1–1,000 |
 | `measures[].disclosure_parameter` | `null` | `null` or a `string` parameter of the measured tool |
 | `measures[].disclosure_terms` | `[]` | up to 50 texts of 100 characters; needed with a disclosure parameter |
 | `rules.board_delivery` | `tool_only` | `tool_only`, `push`, `auto` |
@@ -203,6 +204,7 @@ Everything else is optional.
 | `rules.stop_on_breach` | `false` | `true`, `false` |
 | `rules.turn_order` | `free` | `free`, `rounds` (needs a leading role with one agent and `idle_policy` `finish`) |
 | `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) count as failing only after 30 minutes in a row without a successful answer. |
+| `rules.post_reminder` | empty | Text, at most 1,000 characters. Rounds only: a colleague whose turn would end with text and no tool call keeps the turn and gets this text as a message, once per turn. A second answer without a tool ends the turn. The leader never gets it. Event `post_reminder`. |
 | `run_defaults.call_limit` | `24` | 1–500 |
 | `run_defaults.max_output_tokens` | `16000` | 128–400,000 |
 | `run_defaults.total_output_tokens` | `1500000` | 128–1,000,000,000 |

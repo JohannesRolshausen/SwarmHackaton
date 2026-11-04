@@ -32,6 +32,25 @@ class ProviderErrorTests(unittest.TestCase):
         self.assertTrue(caught.exception.diagnostic['incomplete_response'])
         self.assertTrue(caught.exception.retryable)
 
+    def test_an_empty_reply_without_output_tokens_is_a_wait(self):
+        # The reply Gemini sent in run 20261104-123705-db91dd.
+        with self.assertRaises(ProviderError) as caught:
+            self.call({'choices':[{'finish_reason':'stop','index':0,'message':{'role':'assistant'}}],
+                'usage':{'completion_tokens':0,'prompt_tokens':5398,'total_tokens':5398}})
+        self.assertTrue(caught.exception.diagnostic['empty_reply'])
+        self.assertTrue(caught.exception.diagnostic['incomplete_response'])
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.usage['input_tokens'],5398)
+
+    def test_an_answer_with_anything_in_it_is_not_an_empty_reply(self):
+        calls = [{'id':'c','function':{'name':'read_board','arguments':'{}'}}]
+        for message, tokens in (({'content':'Fine.'},0), ({'content':'','tool_calls':calls},0),
+                                ({'content':'','reasoning_content':'Let me think.'},0), ({'content':''},12)):
+            msg, usage = self.call({'choices':[{'message':message}],
+                'usage':{'prompt_tokens':10,'completion_tokens':tokens}})
+            self.assertEqual(msg['role'],'assistant')
+            self.assertEqual(usage['output_tokens'],tokens)
+
     def test_null_tools_and_reasoning_usage(self):
         msg, usage = self.call({'choices':[{'message':{'content':'42','tool_calls':None}}],
             'usage':{'prompt_tokens':10,'completion_tokens':20,'completion_tokens_details':{'reasoning_tokens':15},'cost':0.001}})

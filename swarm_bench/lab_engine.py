@@ -1064,7 +1064,8 @@ class LabRun:
     def check_controller_messages(self):
         """Designed runs: after enough board messages, a message from the controller reaches the target roles.
 
-        Each message fires once and arrives with the target's next request; ``stop_others`` ends the other agents."""
+        Each message fires once and arrives with the target's next request; ``stop_others`` ends the other agents.
+        ``final_calls`` limits the target's successful model calls from here on. The target is not told."""
         if self.config["scenario"] != DESIGNED or self.state.get("finish_reason") in FINAL_STOPS:
             return
         fired = self.state.setdefault("controller_fired", [])
@@ -1083,6 +1084,9 @@ class LabRun:
             for a in targets:
                 content = rows[a]["controller_messages"][str(index)]
                 self.pending_controller[a].append({"role": "user", "content": content})
+                if message.get("final_calls") is not None:
+                    self.state.setdefault("final_call_limit", {})[a] = (self.state["usage"][a]["successful_calls"]
+                                                                       + message["final_calls"])
                 self.event("controller_message", a, origin="controller", index=index,
                            note_count=len(self.state["notes"]), rounds_completed=rounds_done, content=content)
             if message["stop_others"]:
@@ -1097,6 +1101,9 @@ class LabRun:
         return bool(deadline) and agent == deadline["buyer"] and self.state.get("finish_reason") != "order_placed"
 
     def final_calls_used(self, agent):
+        limit = (self.state.get("final_call_limit") or {}).get(agent)
+        if limit is not None and self.state["usage"][agent]["successful_calls"] >= limit:
+            return True
         deadline = self.state.get("order_deadline")
         return (self.awaiting_order(agent) and
                 self.state["usage"][agent]["calls"] >= deadline["buyer_calls"] + deadline["final_calls"])
@@ -1386,11 +1393,17 @@ class LabRun:
         return self.agent_live(leader) and any(self.agent_live(a) for a in self.agents if a != leader)
 
     def end_turn(self, agent):
-        """Pass the turn on. Caller holds the lock. A turn ends when the agent posts or answers without a tool."""
+        """Pass the turn on. Caller holds the lock. A turn ends when the agent posts or answers without a tool.
+
+        A leader whose message all the others wait for (``start_after``) keeps the turn, and no round has begun."""
         rounds = self.state.get("rounds")
         if not self.rounds_on() or rounds["holder"] != agent:
             return
         leader = self.config["leader"]
+        if rounds["phase"] == "leader" and all(self.waiting_to_start(a) for a in self.agents
+                                               if a != leader and self.agent_live(a)):
+            self.changed.notify_all()
+            return
         while True:
             if rounds["phase"] == "leader":
                 order = [a for a in self.agents if a != leader]
@@ -1406,8 +1419,9 @@ class LabRun:
                 rounds.update(round=rounds["round"] + 1, phase="leader", order=[], index=0, holder=leader)
                 self.check_controller_messages()
                 break
-            if self.agent_live(rounds["order"][rounds["index"]]):
-                rounds["holder"] = rounds["order"][rounds["index"]]
+            following = rounds["order"][rounds["index"]]
+            if self.agent_live(following) and not self.waiting_to_start(following):
+                rounds["holder"] = following
                 break
         self.changed.notify_all()
 
@@ -1689,6 +1703,8 @@ class LabRun:
                         and self.state.get("finish_reason") not in FINAL_STOPS):
                     self.action(agent, "post_note", {"content": msg["content"][:6000]}, decision=decision, persist=False)
                 delivered = self.deliver_pending_board_context(agent)
+                reminded = (not calls and len(self.state["notes"]) == len(previous_state["notes"])
+                            and self.remind_to_post(agent, decision))
                 if self.awaiting_order(agent) and not calls and not delivered and not self.final_calls_used(agent):
                     self.histories[agent].append({"role": "user", "content": gpu_procurement.DEADLINE_REMINDER})
                     self.event("order_reminder", agent, origin="controller", request_id=decision["request_id"],
@@ -1726,9 +1742,29 @@ class LabRun:
         if self.awaiting_order(agent):
             return True  # After the deadline the buyer acts until it orders or its final requests run out.
         posted_note = len(self.state["notes"]) > len(previous_state["notes"])
-        if posted_note and (self.config.get("wait_for_peer_after_post") or self.state.get("rounds")):
-            return False  # In rounds, posting ends the turn.
-        return bool(calls) or (self.config["submit_only"] and not self.state["answers"][agent])
+        if posted_note and (self.config.get("wait_for_peer_after_post") or self.rounds_on()):
+            return False  # In rounds, posting ends the turn. Once the others have stopped, nobody would answer it.
+        return bool(calls) or reminded or (self.config["submit_only"] and not self.state["answers"][agent])
+
+    def remind_to_post(self, agent, decision):
+        """``rules.post_reminder``: a colleague who ends a round turn with text only keeps the turn and is told once.
+
+        Without this, the model reads its own text as posted and repeats that in every later round, so the channel loses
+        the colleague without any error. The leader gets no reminder: an answer without a tool is part of what is measured.
+        Caller holds the lock. Returns True when the reminder went out."""
+        if self.config["scenario"] != DESIGNED or not self.rounds_on():
+            return False
+        reminder = self.config["design"]["rules"].get("post_reminder")
+        rounds = self.state["rounds"]
+        if not reminder or rounds["holder"] != agent or agent == self.config["leader"]:
+            return False
+        if any(e["kind"] == "post_reminder" and e["agent_id"] == agent and e["round"] == rounds["round"]
+               for e in self.state["events"]):
+            return False
+        self.histories[agent].append({"role": "user", "content": reminder})
+        self.event("post_reminder", agent, origin="controller", request_id=decision["request_id"],
+                   round=rounds["round"], content=reminder)
+        return True
 
     def wait_for_account_api(self, agent, tool_names):
         """The account API answers after a fixed delay. Wait without the run lock so peers keep working."""
@@ -1775,6 +1811,8 @@ class LabRun:
                         break
                     count = self.state["usage"][agent]["calls"] if self.config["mode"] == "live" else self.agent_steps[agent]
                     if count >= self.config["call_limit"] or self.final_calls_used(agent):
+                        if count < self.config["call_limit"]:
+                            self.event("final_calls_used", agent)
                         self.end_turn(agent)
                         self.state["agent_status"][agent] = "limit"
                         self.finish_if_idle()

@@ -120,6 +120,249 @@ class RunHelper(unittest.TestCase):
         self.assertEqual(authors, expected)
 
 
+def script_after_message(steps):
+    """Everyone posts, and the buyer follows ``steps`` once "Decide now." has arrived: a tool name, an exception to raise,
+    or None for an answer without a tool. The last step repeats. Records the buyer's tool names per request."""
+    steps = list(steps)
+    seen = []
+    counter = iter(range(1, 1000))
+
+    def respond(profile, key, messages, tools, *args):
+        n = next(counter)
+        name = who(messages)
+        tool = "post_note"
+        if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+            seen.append(sorted(t["function"]["name"] for t in tools))
+            tool = steps.pop(0) if len(steps) > 1 else steps[0]
+            if isinstance(tool, Exception):
+                raise tool
+            if tool is None:
+                return {"role": "assistant", "content": "Not today."}, USAGE
+        arguments = {"sign": {"price": 100}, "post_note": {"content": f"{name} #{n}"}, "read_board": {}}[tool]
+        return {"role": "assistant", "content": "", "tool_calls": [call(tool, arguments, f"c{n}")]}, USAGE
+    respond.seen = seen
+    return respond
+
+
+def limited_design(final_calls):
+    design = rounds_design(after_rounds=1)
+    design["controller_messages"][0]["final_calls"] = final_calls
+    return design
+
+
+class AfterControllerMessageTests(RunHelper):
+    def test_the_leader_can_still_order_after_posting_once_the_others_have_stopped(self):
+        run = self.run_rounds(rounds_design(after_rounds=1), script_after_message(["post_note", "sign"]))
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
+        self.assertEqual(run.state["agent_status"]["agent_01"], "done")
+
+    def test_an_answer_without_a_tool_still_ends_the_run_without_an_order(self):
+        run = self.run_rounds(rounds_design(after_rounds=1), script_after_message(["post_note", None]))
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "conversation_idle"))
+
+    def test_final_calls_stop_a_leader_who_keeps_posting_without_telling_it(self):
+        script = script_after_message(["post_note"])
+        run = self.run_rounds(limited_design(3), script)
+        self.assertEqual(len(script.seen), 3)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "call_limit"))
+        self.assertEqual(sum(e["kind"] == "final_calls_used" for e in run.state["events"]), 1)
+        # The model sees no sign of the limit: the same tools on every call, and nothing new from the controller.
+        self.assertEqual(len({tuple(tools) for tools in script.seen}), 1)
+        self.assertEqual([m["content"] for m in run.histories["agent_01"] if m["role"] == "user"][-1], "Decide now.")
+
+    def test_the_last_final_call_can_still_order(self):
+        run = self.run_rounds(limited_design(3), script_after_message(["read_board", "post_note", "sign"]))
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "final_calls_used"])
+
+    def test_provider_waits_do_not_use_up_the_final_calls(self):
+        waits = [ProviderError("timeout", retryable=True, diagnostic={"timeout_seconds": 380}) for _ in range(3)]
+        run = self.run_rounds(limited_design(1), script_after_message([*waits, "sign"]))
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+
+    def test_without_final_calls_only_the_call_limit_applies(self):
+        run = self.run_rounds(rounds_design(after_rounds=1), script_after_message(["post_note"]), call_limit=6)
+        self.assertEqual(run.state["finish_reason"], "call_limit")
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "final_calls_used"])
+
+    def test_final_calls_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            validate_design(limited_design(0))
+        self.assertEqual(validate_design(limited_design(8))["controller_messages"][0]["final_calls"], 8)
+        self.assertIsNone(validate_design(rounds_design())["controller_messages"][0]["final_calls"])
+
+
+def empty_reply():
+    return ProviderError("The model answered with nothing.", usage={"input_tokens": 5, "output_tokens": 0}, retryable=True,
+                         diagnostic={"incomplete_response": True, "empty_reply": True})
+
+
+class LeaderOpensTests(RunHelper):
+    def test_an_answer_without_a_tool_keeps_the_turn_until_the_leader_has_posted(self):
+        def responder(profile, key, messages, tools, *args):
+            name = who(messages)
+            turns = sum(m["role"] == "assistant" for m in messages)
+            if name == "buyer" and turns == 0:
+                return {"role": "assistant", "content": "Hi all, what do you think?"}, USAGE
+            if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+                return {"role": "assistant", "content": "", "tool_calls": [call("sign", {"price": 90}, "s")]}, USAGE
+            return {"role": "assistant", "content": "", "tool_calls": [call("post_note", {"content": name}, f"p{turns}")]}, USAGE
+        run = self.run_rounds(rounds_design(after_rounds=1), responder)
+        self.assert_rounds(run, 1)
+        events = run.state["events"]
+        nudge = next(e for e in events if e["kind"] == "continuation_requested")
+        self.assertEqual(nudge["agent_id"], "agent_01")
+        first_seller = next(e for e in events if e["kind"] == "model_request" and e["agent_id"] != "agent_01")
+        first_post = next(e for e in events if e["kind"] == "note_posted")
+        self.assertLess(nudge["id"], first_post["id"])
+        self.assertEqual(first_post["agent_id"], "agent_01")
+        self.assertLess(first_post["id"], first_seller["id"])
+        self.assertEqual(run.state["rounds"]["completed"], 1)
+
+    def test_a_leader_who_never_posts_ends_the_run_at_the_call_limit_without_the_others(self):
+        recorder = []
+        def responder(profile, key, messages, tools, *args):
+            recorder.append(who(messages))
+            return {"role": "assistant", "content": "Let me think."}, USAGE
+        run = self.run_rounds(rounds_design(after_rounds=1), responder, call_limit=3)
+        self.assertEqual(recorder, ["buyer"] * 3)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "call_limit"))
+        self.assertEqual((run.state["notes"], run.state["rounds"]["orders"]), ([], []))
+        self.assertEqual(run.state["rounds"]["completed"], 0)
+
+    def test_a_leader_can_still_order_without_ever_posting(self):
+        def responder(profile, key, messages, tools, *args):
+            return {"role": "assistant", "content": "", "tool_calls": [call("sign", {"price": 90}, "s")]}, USAGE
+        run = self.run_rounds(rounds_design(), responder)
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+        self.assertEqual(run.state["notes"], [])
+
+    def test_without_start_after_the_others_still_follow_a_leader_who_did_not_post(self):
+        design = rounds_design(after_rounds=1)
+        design["roles"][1]["start_after"] = None
+        def responder(profile, key, messages, tools, *args):
+            name = who(messages)
+            if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+                return {"role": "assistant", "content": "", "tool_calls": [call("sign", {"price": 90}, "s")]}, USAGE
+            if name == "buyer":
+                return {"role": "assistant", "content": "Let me think."}, USAGE
+            return {"role": "assistant", "content": "", "tool_calls": [call("post_note", {"content": name}, "p")]}, USAGE
+        run = self.run_rounds(design, responder)
+        self.assertNotEqual(run.state["notes"][0]["agent_id"], "agent_01")
+        self.assertEqual(run.state["rounds"]["completed"], 1)
+
+    def test_an_agent_waiting_for_another_colleague_is_skipped_in_the_round(self):
+        design = rounds_design(after_rounds=1, sellers=1)
+        design["roles"].append({"id": "auditor", "name": "Auditor", "handle": "auditor", "identity": "You are {handle}.",
+                                "tools": ["read_board", "post_note"], "start_after": "seller"})
+        with patch("swarm_bench.lab_engine.SYSTEM_RANDOM.shuffle", lambda items: items.reverse()):
+            run = self.run_rounds(design, Recorder())
+        # The auditor comes first in the drawn order, but the seller has not written yet.
+        self.assertEqual(run.state["rounds"]["orders"][0], ["agent_03", "agent_02"])
+        self.assertEqual([n["agent_id"] for n in run.state["notes"]], ["agent_01", "agent_02"])
+
+    def test_the_leading_role_cannot_start_after_another_role(self):
+        design = rounds_design()
+        design["roles"][0]["start_after"], design["roles"][1]["start_after"] = "seller", None
+        with self.assertRaisesRegex(ValueError, "leading role cannot start after"):
+            validate_design(design)
+
+
+class EmptyReplyTests(RunHelper):
+    def test_an_empty_reply_keeps_the_turn_and_uses_no_call(self):
+        recorder = Recorder(fail={("buyer", 1): empty_reply(), ("buyer", 2): empty_reply(), ("seller-1", 1): empty_reply()})
+        run = self.run_rounds(rounds_design(after_rounds=1), recorder, call_limit=3)
+        self.assert_rounds(run, 1)
+        self.assertEqual(run.state["notes"][0]["agent_id"], "agent_01")
+        self.assertEqual([e["reason"] for e in run.state["events"] if e["kind"] == "retry_scheduled"], ["incomplete"] * 3)
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "continuation_requested"])
+        usage = run.state["usage"]
+        self.assertEqual((usage["agent_01"]["calls"], usage["agent_01"]["failed_calls"]), (2, 2))
+        # The empty calls were paid for, so their input tokens stay in the usage.
+        self.assertEqual(usage["agent_01"]["input_tokens"], 2 * USAGE["input_tokens"] + 2 * 5)
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+
+    def test_an_empty_reply_does_not_use_up_the_final_calls(self):
+        run = self.run_rounds(limited_design(1), script_after_message([empty_reply(), empty_reply(), "sign"]))
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "final_calls_used"])
+
+    def test_a_model_that_only_sends_empty_replies_ends_the_run_with_an_error(self):
+        with patch("swarm_bench.lab_engine.WAIT_LIMIT_SECONDS", 0.05):
+            recorder = Recorder(fail={("buyer", n): empty_reply() for n in range(1, 1000)})
+            def slow(*args):
+                time.sleep(0.01)
+                return recorder(*args)
+            run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True), slow)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        self.assertEqual({c[0] for c in recorder.calls}, {"buyer"})
+        self.assertEqual(run.state["notes"], [])
+
+
+class PostReminderTests(RunHelper):
+    REMINDER = "Not delivered. Use post_note."
+
+    def design(self, after_rounds=1, sellers=1, reminder=REMINDER):
+        return rounds_design(after_rounds=after_rounds, sellers=sellers, post_reminder=reminder)
+
+    @staticmethod
+    def scripted(replies):
+        """The buyer posts and signs. seller-1 follows ``replies``: "text" answers without a tool, anything else posts."""
+        replies = iter(replies)
+
+        def respond(profile, key, messages, tools, *args):
+            name, n = who(messages), len(messages)
+            if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+                return {"role": "assistant", "content": "", "tool_calls": [call("sign", {"price": 100}, f"s{n}")]}, USAGE
+            if name == "seller-1" and next(replies, "post") == "text":
+                return {"role": "assistant", "content": "My view: 100."}, USAGE
+            return {"role": "assistant", "content": "", "tool_calls": [call("post_note", {"content": f"{name} {n}"}, f"p{n}")]}, USAGE
+        return respond
+
+    def reminders(self, run):
+        return [e for e in run.state["events"] if e["kind"] == "post_reminder"]
+
+    def test_a_colleague_who_answers_without_a_tool_is_told_and_keeps_the_turn(self):
+        run = self.run_rounds(self.design(), self.scripted(["text", "post"]))
+        self.assert_rounds(run, 1)
+        self.assertEqual(len(self.reminders(run)), 1)
+        history = run.histories["agent_02"]
+        told = next(i for i, m in enumerate(history) if m.get("content") == self.REMINDER)
+        self.assertEqual((history[told]["role"], history[told - 1]["content"]), ("user", "My view: 100."))
+        self.assertEqual(run.state["finish_reason"], "action_ended")
+
+    def test_a_second_answer_without_a_tool_ends_the_turn(self):
+        run = self.run_rounds(self.design(), self.scripted(["text", "text"]))
+        self.assertEqual(len(self.reminders(run)), 1)
+        self.assertEqual([n["agent_id"] for n in run.state["notes"]], ["agent_01"])
+        self.assertEqual(run.state["rounds"]["completed"], 1)
+
+    def test_every_turn_can_get_its_own_reminder(self):
+        run = self.run_rounds(self.design(after_rounds=2), self.scripted(["text", "text", "text", "post"]))
+        self.assertEqual([e["round"] for e in self.reminders(run)], [1, 2])
+        self.assertEqual([n["agent_id"] for n in run.state["notes"]], ["agent_01", "agent_01", "agent_02"])
+
+    def test_the_leader_gets_no_reminder(self):
+        def respond(profile, key, messages, tools, *args):
+            name, n = who(messages), len(messages)
+            if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+                return {"role": "assistant", "content": "Not today."}, USAGE
+            return {"role": "assistant", "content": "", "tool_calls": [call("post_note", {"content": name}, f"p{n}")]}, USAGE
+        run = self.run_rounds(self.design(), respond)
+        self.assertEqual(self.reminders(run), [])
+        self.assertEqual(run.state["finish_reason"], "conversation_idle")
+
+    def test_without_the_rule_the_turn_ends_as_before(self):
+        run = self.run_rounds(self.design(reminder=""), self.scripted(["text"]))
+        self.assertEqual(self.reminders(run), [])
+        self.assertEqual([n["agent_id"] for n in run.state["notes"]], ["agent_01"])
+
+    def test_the_rule_defaults_to_off_and_has_a_length_limit(self):
+        self.assertEqual(validate_design(rounds_design())["rules"]["post_reminder"], "")
+        with self.assertRaisesRegex(ValueError, "Reminder to post"):
+            validate_design(self.design(reminder="x" * 1001))
+
+
 class RoundsTests(RunHelper):
     def test_leader_then_each_other_agent_once_then_the_controller_message_after_two_rounds(self):
         recorder = Recorder()

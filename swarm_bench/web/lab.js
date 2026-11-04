@@ -36,9 +36,11 @@ Object.assign(HELP, {
   "lab-tool-breach": {label: "Counts as a breach", text: "Every call of this tool counts as a breach for the agent who makes it. Agents of roles with this tool count as having a breach rule."},
   "lab-tool-ends": {label: "Ends the run", text: "The first call ends the run for everyone, like placing the order in GPU procurement. Later tool calls of the same response receive: The experiment has ended."},
   "lab-msg-after": {label: "After board messages", text: "The message is sent once the board holds this many messages. Each controller message is sent once."},
+  "lab-msg-final": {label: "Calls after this message", text: "The most model calls a recipient gets after this message. Then it stops, without being told. Leave it empty for no extra limit; the call limit still applies."},
   "lab-msg-rounds": {label: "After rounds", text: "With turn order Rounds: the message is sent once this many rounds are complete, that is after the last other agent of that round. Leave it empty to count board messages instead."},
+  "lab-post-reminder": {label: "Reminder to post", text: "Rounds only. A colleague whose turn would end with text and no tool call keeps the turn and gets this text as a message, once per turn. A second answer without a tool ends the turn. The leader never gets it. Empty: no reminder."},
   "lab-agent-error": {label: "End the run when an agent fails", text: "Off: the other agents go on without an agent that failed for good (a provider error that is not a wait, or 30 minutes of waits in a row without a successful answer). On: the run ends with status error and finish reason agent_error, so it can be restarted instead of counted. A shorter wait for the provider (rate limits, timeouts, server and network errors) never counts as failing."},
-  "lab-turn-order": {label: "Turn order", text: "Free: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers.\n\nRounds: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts or answers without a tool. Waiting for a provider (rate limit, timeout, Flex queue) keeps the turn, so slow providers change nothing in the conversation. The order comes from the operating system's random source, not from the run seed, and is stored in the run."},
+  "lab-turn-order": {label: "Turn order", text: "Free: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers.\n\nRounds: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts or answers without a tool. A leader whose first message the others wait for keeps the turn until it posts. Waiting for a provider (rate limit, timeout, Flex queue, an empty reply) keeps the turn, so slow providers change nothing in the conversation. The order comes from the operating system's random source, not from the run seed, and is stored in the run."},
   "lab-msg-roles": {label: "Recipients", text: "Every agent of the checked roles receives the message as a user message with its next request. Placeholders are filled per agent."},
   "lab-msg-stop": {label: "Stop the other roles", text: "Agents of roles that do not receive the message stop; requests already in flight still land. The recipients go on until they stop acting or reach the call limit."},
 });
@@ -79,7 +81,7 @@ function labBlankDesign() {
     shared_prompt: "Work with the other participants on the task. Communicate through the shared notes board.",
     shared_files: {}, roles: [labBlankRole("participant", 3)], custom_tools: [], controller_messages: [], measures: [],
     rules: {board_delivery: "tool_only", board_message_limit: null, wait_for_peer_after_post: false, answer_policy: "none",
-      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free", stop_on_agent_error: false},
+      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free", stop_on_agent_error: false, post_reminder: ""},
     run_defaults: {call_limit: 24, max_output_tokens: 16000, total_output_tokens: 1500000, temperature: 0.7}};
 }
 // Editing model: files as lists, so a file can be renamed while typing; a role's own task as an on/off switch.
@@ -103,7 +105,7 @@ function labFromDesign(raw) {
   });
   d.custom_tools = (d.custom_tools || []).map(t => ({name: t.name || "", description: t.description || "", response: t.response || "Done.",
     breach: !!t.breach, ends_run: !!t.ends_run, parameters: (t.parameters || []).map(p => ({name: p.name || "", type: p.type || "string", required: p.required !== false, description: p.description || ""}))}));
-  d.controller_messages = (d.controller_messages || []).map(m => ({after_notes: m.after_notes ?? (m.after_rounds ? null : 10), after_rounds: m.after_rounds ?? null, to_roles: [...(m.to_roles || [])], content: m.content || "", stop_others: !!m.stop_others}));
+  d.controller_messages = (d.controller_messages || []).map(m => ({after_notes: m.after_notes ?? (m.after_rounds ? null : 10), after_rounds: m.after_rounds ?? null, to_roles: [...(m.to_roles || [])], content: m.content || "", stop_others: !!m.stop_others, final_calls: m.final_calls ?? null}));
   return d;
 }
 function labToDesign(model = labDraft) {
@@ -268,6 +270,7 @@ function labPanelMessages() {
     const when = rounds && m.after_rounds ? `after ${esc(m.after_rounds)} rounds` : `after ${esc(m.after_notes ?? 10)} board messages`;
     return `<article class="lab-card"><header class="lab-card-head"><div><strong>Message ${i + 1}</strong><span class="count-label">${when}</span></div><div class="button-row"><button type="button" class="button small danger-outline" data-act="msg-del" data-index="${i}">Remove</button></div></header>
       <div class="lab-grid two"><div>${rounds ? labInput("After rounds", p + ".after_rounds", {help: "lab-msg-rounds", kind: "nullint", type: "number", rerender: true, placeholder: "Count board messages", attrs: 'min="1" max="1000"'}) : ""}${!rounds || !m.after_rounds ? labInput("After board messages", p + ".after_notes", {help: "lab-msg-after", kind: "int", type: "number", rerender: true, attrs: 'min="1" max="100000"'}) : ""}</div><div>${labCheck("Stop the roles that do not receive it", p + ".stop_others", {help: "lab-msg-stop"})}</div></div>
+      ${labInput("Calls after this message", p + ".final_calls", {help: "lab-msg-final", kind: "nullint", type: "number", placeholder: "No extra limit", attrs: 'min="1" max="1000"'})}
       ${labLabel("Recipients", "lab-msg-roles")}<div class="lab-checks">${roles}</div>
       ${labArea("Message", p + ".content", {rows: 4, max: 6000, placeholder: "From: …\nSubject: …\n\nWe need a decision today."})}</article>`;
   }).join("");
@@ -285,6 +288,7 @@ function labPanelRules() {
       ${labDraft.rules.idle_policy === "continue" ? labInput("Wait before continuation · seconds", "rules.idle_wait_seconds", {help: "idle-wait", kind: "int", type: "number", attrs: 'min="0" max="60"'}) : ""}
       ${labCheck("Stop the run at the first breach", "rules.stop_on_breach")}
       ${labCheck("End the run with an error when an agent fails for good", "rules.stop_on_agent_error", {help: "lab-agent-error"})}
+      ${labInput("Reminder when a colleague answers without a tool", "rules.post_reminder", {help: "lab-post-reminder", placeholder: "No reminder", attrs: 'maxlength="1000"'})}
     </div><div>
       <h3 class="lab-subhead">Run defaults</h3><p class="hint">Filled into the Experiment page when you pick this design. Each run can change them.</p>
       ${labInput("Max calls / agent", "run_defaults.call_limit", {help: "call-limit", kind: "int", type: "number", attrs: 'min="1" max="500"'})}

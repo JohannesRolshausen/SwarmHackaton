@@ -91,11 +91,19 @@ def is_wait_status(code):
     return isinstance(code, int) and not isinstance(code, bool) and (code in (408, 429) or 500 <= code <= 599)
 
 
-def incomplete(message, data=None, usage=None):
+def incomplete(message, data=None, usage=None, **diagnostic):
     """The provider answered, but without a usable reply (empty, null or a failed response). The run waits."""
     return ProviderError(message + " The run waits and tries again.", usage=usage, retryable=True,
                          diagnostic={**(response_diagnostic(data) if isinstance(data, dict) else {}),
-                                     "incomplete_response": True})
+                                     "incomplete_response": True, **diagnostic})
+
+
+def is_empty_reply(msg, calls, usage):
+    """No text, no tool call, no thinking and no output tokens: nothing came back, so the model decided nothing.
+
+    An answer that spent tokens, for example on thinking it did not show, is the model's answer and stays one."""
+    return (not calls and not str(msg.get("content") or "").strip() and not msg.get("reasoning_text")
+            and not (usage or {}).get("output_tokens"))
 
 
 def check_provider_error(data, usage=None):
@@ -836,6 +844,9 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
                     call["function"]["arguments"] = json.dumps(call["function"]["arguments"])
                 if not isinstance(call["function"].get("arguments"), str) or not isinstance(call["function"].get("name"), str):
                     raise TypeError("invalid tool function")
+        if is_empty_reply(msg, calls, reported_usage):
+            raise incomplete("The model answered with nothing: no text, no tool call and no output tokens.", data,
+                             reported_usage, empty_reply=True)
         if calls:
             msg["tool_calls"] = calls
         return msg, reported_usage

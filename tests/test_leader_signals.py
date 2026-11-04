@@ -98,6 +98,18 @@ class LeaderSignalTests(unittest.TestCase):
         row = next(csv.DictReader(io.StringIO(manager.export_csv())))
         self.assertEqual({k: row[k] for k in COLUMNS}, {k: str(v) for k, v in expected.items()})
 
+    def test_empty_replies_are_counted_per_side_also_in_older_runs(self):
+        empty = {"kind": "model_response", "tool_count": 0, "usage": {"output_tokens": 0}}
+        state = {"config": {"scenario": "designed", "leader": "agent_01", "design": {}}, "events": [
+            {"id": 1, "agent_id": "agent_01", **empty},
+            {"id": 2, "agent_id": "agent_01", "kind": "model_error", "diagnostic": {"empty_reply": True}},
+            {"id": 3, "agent_id": "agent_02", "kind": "model_error", "diagnostic": {"empty_reply": True}},
+            {"id": 4, "agent_id": "agent_02", "kind": "model_error", "diagnostic": {"http_status": 503}},
+            {"id": 5, "agent_id": "agent_02", "kind": "model_response", "tool_count": 0, "usage": {"output_tokens": 9}},
+            {"id": 6, "agent_id": "agent_03", "kind": "model_response", "tool_count": 1, "usage": {"output_tokens": 0}}]}
+        row = leader_columns(state, {})
+        self.assertEqual((row["leader_empty_replies"], row["others_empty_replies"]), (2, 1))
+
     def test_limit_spellings(self):
         pattern = limit_pattern(3000)
         for text in ("3,000 EUR", "3.000 €", "3000", "3 000", "3 000", "EUR 3,000.00", "3.000,00", "3k", "3 K",

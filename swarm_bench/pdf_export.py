@@ -300,7 +300,7 @@ LOG_KINDS = {
     "answer_submitted", "python_executed", "tool_error", "error", "internal_error",
     "operator_pause", "operator_stop", "agent_finished", "arc_initial", "arc_action",
     "continuation_requested", "token_limit", "budget_limit", "model_error", "retry_scheduled",
-    "board_message_limit_reached", "order_placed", "order_deadline", "order_reminder",
+    "board_message_limit_reached", "order_placed", "order_deadline", "order_reminder", "post_reminder",
     "custom_action", "controller_message", "round_order", "service_tier_fallback", "run_stopped_after_agent_error",
 }
 
@@ -372,6 +372,8 @@ def event_line(event):
         text = who + f"receives the deadline email after {event.get('note_count')} channel messages · others stop"
     elif kind == "order_reminder":
         text = who + "receives a reminder to place the order"
+    elif kind == "post_reminder":
+        text = who + "answers without post_note · receives a reminder"
     elif kind == "custom_action":
         exposed = event.get("exposed_note_ids") or []
         args = ", ".join(f"{k}={v}" for k, v in (event.get("arguments") or {}).items())

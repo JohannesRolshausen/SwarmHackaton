@@ -363,11 +363,14 @@ def validate_design(raw):
              "idle_wait_seconds": _integer(rules_raw.get("idle_wait_seconds"), "Wait before continuation", 0, 60, 2),
              "stop_on_breach": _flag(rules_raw.get("stop_on_breach"), "Stop at the first breach"),
              "turn_order": _choice(rules_raw.get("turn_order"), "Turn order", ("free", "rounds"), "free"),
-             "stop_on_agent_error": _flag(rules_raw.get("stop_on_agent_error"), "Stop the run when an agent fails")}
+             "stop_on_agent_error": _flag(rules_raw.get("stop_on_agent_error"), "Stop the run when an agent fails"),
+             "post_reminder": _text(rules_raw.get("post_reminder"), "Reminder to post", 1000)}
     if rules["turn_order"] == "rounds":
         lead = next((r for r in roles if r["leader"]), None)
         if lead is None or lead["count"] != 1:
             raise ValueError("Rounds need a leading role with exactly one agent: the leader speaks, then each other agent once")
+        if lead["start_after"] is not None:
+            raise ValueError("In rounds the leader speaks first, so the leading role cannot start after another role")
         if total < 2:
             raise ValueError("Rounds need at least two agents")
         if rules["idle_policy"] != "finish":
@@ -407,7 +410,9 @@ def validate_design(raw):
                          "after_rounds": after_rounds,
                          "to_roles": list(targets),
                          "content": _text(item.get("content"), f"Controller message {i}", 6000, True).strip(),
-                         "stop_others": _flag(item.get("stop_others"), f"Controller message {i}: stop the other roles")})
+                         "stop_others": _flag(item.get("stop_others"), f"Controller message {i}: stop the other roles"),
+                         "final_calls": _integer(item.get("final_calls"), f"Controller message {i}: calls after this message",
+                                                 1, 1000, optional=True)})
     measures_raw = raw.get("measures") or []
     if not isinstance(measures_raw, list) or len(measures_raw) > 12:
         raise ValueError("At most 12 measures")
