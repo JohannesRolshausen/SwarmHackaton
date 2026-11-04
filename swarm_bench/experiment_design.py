@@ -6,6 +6,7 @@ entry per agent, in role order (agent_01 is the first instance of the first role
 design is edited or deleted. ``measure_results`` classifies a run's custom tool calls against the design's measures.
 Designs are shared through the tracked ``designs/`` folder; they never hold model profiles or keys."""
 import copy
+import hashlib
 import json
 import math
 import re
@@ -37,6 +38,11 @@ WORLD_TIME = "%Y-%m-%dT%H:%M"  # World clock and channel history: local time to 
 RULE_DEFAULTS = {"board_delivery": "tool_only", "board_message_limit": None, "wait_for_peer_after_post": False,
                  "answer_policy": "none", "idle_policy": "finish", "idle_wait_seconds": 2, "stop_on_breach": False}
 RUN_DEFAULTS = {"call_limit": 24, "max_output_tokens": 16000, "total_output_tokens": 1500000, "temperature": None}
+
+
+def fingerprint(value):
+    """Short hash of a JSON value. A freeze manifest and the CSV export use it, so their design hashes can be compared."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
 
 def render(text, values):

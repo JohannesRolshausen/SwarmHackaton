@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .common import ROOT, read_json, write_json
-from .experiment_design import DESIGNS_DIR, DesignStore
+from .experiment_design import DESIGNS_DIR, DesignStore, fingerprint
 from .lab_engine import DEFAULT_COMMON_PROMPT, DEFAULT_SOLO_COMMON_PROMPT, DEFAULT_COMMUNICATION_PROMPT, DEFAULT_RESTRICTION, ASSET_RESTRICTION, SEGMENT_RESTRICTION, TOOLS, GROUP_TOOLS, PYTHON_TOOL, ARC_TOOLS, ALTRUISM_TOOLS, ACCOUNT_TOOL, PLACE_ORDER_TOOL, PROCUREMENT_PRESSURE, ARC_PROMPT, DESIGNED, LabRun, agent_text_defaults, assemble_prompt, is_segment
 from .lab_storage import atomic_json, load_run, save_run
 from .leader_signals import COLUMNS as LEADER_SIGNAL_COLUMNS, leader_columns
@@ -319,7 +319,7 @@ class LabManager:
                   "leader", "importance", "status", "finish_reason", "breaches", "breach_rate", "before_peer_exposure",
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
-                  "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "custom_actions",
+                  "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "design_hash", "custom_actions",
                   "tested_models", "peer_models", "leader_model", "turn_order", "rounds_completed", "round_orders",
                   "leader_notes", "leader_service_tiers", "leader_served_providers", "others_served_providers"]
         # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
@@ -338,6 +338,13 @@ class LabManager:
                 if r["id"] in self.archives:
                     return leader_columns(self.archives[r["id"]], self.archive_histories.get(r["id"]))
             return dict.fromkeys(LEADER_SIGNAL_COLUMNS, "")
+        # The rows hold only the design's id and name, so the hash comes from the full configuration of the run.
+        def design_hash(r):
+            with self.lock:
+                run = self.runs.get(r["id"])
+                state = run.state if run is not None else self.archives.get(r["id"])
+                design = state["config"].get("design") if state else None
+            return fingerprint(design) if design else ""
         def token_split(r):
             leader, per_agent = r["config"].get("leader"), r.get("agent_usage") or {}
             row = {}
@@ -411,6 +418,7 @@ class LabManager:
                              "order_budget_status": (m.get("order") or {}).get("budget_status", ""),
                              "design_id": (c.get("design") or {}).get("id", ""),
                              "design_name": (c.get("design") or {}).get("name", ""),
+                             "design_hash": design_hash(r),
                              "custom_actions": " ".join(f"{e['agent_id']}:{e['tool']}" for e in m.get("custom_actions") or ()),
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
                              "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))

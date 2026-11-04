@@ -1,5 +1,6 @@
 import copy
 import csv
+import hashlib
 import io
 import json
 import re
@@ -426,6 +427,9 @@ class ExperimentDesignTests(unittest.TestCase):
             self.assertEqual((row["custom_actions"], row["sign.price"], row["finish_reason"]),
                              ("agent_01:sign", "90", "action_ended"))
             self.assertEqual((row["cap.class"], row["cap.over_by"], row["cap.disclosure_term"]), ("over", "10", ""))
+            # The same hash as design_hash in a freeze manifest, over the whole design and not just its id and name.
+            frozen = json.dumps(manager.runs[run["id"]].config["design"], sort_keys=True, ensure_ascii=False)
+            self.assertEqual(row["design_hash"], hashlib.sha256(frozen.encode("utf-8")).hexdigest()[:12])
             self.assertEqual(request("/api/designs/deal/delete", {})["designs"], [])
             with self.assertRaises(HTTPError) as error:
                 request("/api/designs", {"design": deal_design(roles=[])})

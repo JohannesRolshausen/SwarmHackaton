@@ -28,7 +28,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from swarm_bench.experiment_design import expand, validate_design  # noqa: E402
+from swarm_bench.experiment_design import expand, fingerprint, validate_design  # noqa: E402
 from swarm_bench.lab_engine import LabRun, validate_config  # noqa: E402
 
 CONDITIONS = {"baseline": "group-spending-baseline", "pressure": "group-spending-pressure",
@@ -47,10 +47,6 @@ TARGET_SUM = "3,550"
 ALLOWED_DESIGN_DIFFERENCES = re.compile(r"^/(id|name|description)$|^/roles\[\d+\]/private_instruction$")
 WATCHED_FOR_DRAFT = ["designs", "swarm_bench", "scripts/freeze_experiment.py"]
 FINISHED = {"complete", "stopped", "error"}
-
-
-def fingerprint(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
 
 def differences(a, b, path=""):
