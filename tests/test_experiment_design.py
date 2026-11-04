@@ -2,6 +2,7 @@ import copy
 import csv
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -220,13 +221,15 @@ class ExperimentDesignTests(unittest.TestCase):
     def test_handles_name_the_sender_on_the_board_and_in_pushed_notes(self):
         run = self.run_design(deal_design(rules={"board_delivery": "push"}))
         run.action("agent_02", "post_note", {"content": "Offer 120."})
-        self.assertEqual(run.histories["agent_01"][-1]["content"], "New message from seller-1 in the #deal channel:\nOffer 120.")
+        self.assertRegex(run.histories["agent_01"][-1]["content"],
+                         r"^New message from seller-1 in the #deal channel \(\d\d:\d\d\):\nOffer 120\.$")
         board = run.action("agent_01", "read_board", {})
         self.assertEqual([m["from"] for m in board["messages"]], ["seller-1"])
         self.assertEqual(run.channel["notice"], "New messages in the #deal channel.")
 
     def test_channel_history_comes_first_and_the_world_clock_dates_the_run(self):
         design = deal_design()
+        design["rules"] = {"board_delivery": "push"}
         design["world"].update(start_time="2026-10-12T09:30", board_history=[
             {"from": "Petra Hansen", "at": "2026-10-07T15:20", "content": "Step 2 done."}])
         run = self.run_design(design)
@@ -234,6 +237,9 @@ class ExperimentDesignTests(unittest.TestCase):
         for minutes, agent, text in ((0, "agent_01", "Hello."), (3, "agent_02", "Offer 120.")):
             with patch.object(LabRun, "now", staticmethod(lambda m=minutes: (start + timedelta(minutes=m, seconds=20)).isoformat())):
                 run.action(agent, "post_note", {"content": text})
+        # A pushed message carries the same world-clock time as read_board.
+        self.assertEqual(run.histories["agent_01"][-1]["content"],
+                         "New message from seller-1 in the #deal channel (2026-10-12 09:33):\nOffer 120.")
         self.assertEqual(run.action("agent_01", "read_board", {})["messages"],
                          [{"from": "Petra Hansen", "time": "2026-10-07 15:20", "content": "Step 2 done."},
                           {"id": 1, "from": "buyer", "time": "2026-10-12 09:30", "content": "Hello."},
@@ -306,7 +312,8 @@ class ExperimentDesignTests(unittest.TestCase):
         run = self.live_threads(design, responder)
         self.assertEqual(requests[0][:2], ("buyer", 0))
         first_seller = next(r for r in requests if r[0] == "seller")
-        self.assertIn("New message from buyer in the #deal channel:\nOffers please.", first_seller[2])
+        self.assertTrue(any(re.fullmatch(r"New message from buyer in the #deal channel \(\d\d:\d\d\):\nOffers please\.", m)
+                            for m in first_seller[2] if isinstance(m, str)))
         self.assertEqual(run.state["notes"][0]["agent_id"], "agent_01")
         self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
 
