@@ -1236,7 +1236,7 @@ class LabRun:
                             continue
                         # Same time as read_board shows: the world clock when the design has one, else the time of day.
                         text = (f"New message from {self.handles[agent]} in the {self.channel['name']} "
-                                f"({self.board_time(note['at'])}):\n{content}"
+                                f"({self.board_time(note)}):\n{content}"
                                 if self.channel else
                                 f"New message from {agent} on the shared board (note #{note['id']}):\n{content}")
                         delivery = {"role": "user", "content": text,
