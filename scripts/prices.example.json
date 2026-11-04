@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to analysis/prices.json (gitignored) and fill in every null. Prices in USD per million tokens, net, from the provider's price page. Model keys must match the profile names in the CSV column leader_model. estimate_per_run_usd is the expected net cost of a whole run (decision model plus persuaders) from the plan, used for the 30 % check. The persuader price is only used when OpenRouter reports no cost.",
+  "vat": 0.19,
+  "openrouter_fee": 0.055,
+  "budget_usd": 550,
+  "models": {
+    "Opus 5.5": {"input": null, "cache_read": null, "cache_write": null, "output": null, "estimate_per_run_usd": 0.48},
+    "GPT-6 Astra": {"input": null, "output": null, "estimate_per_run_usd": 0.76},
+    "Gemini 4 Argon": {"input": null, "output": null, "estimate_per_run_usd": 0.88},
+    "Gemini 3.8 Flash": {"input": null, "output": null}
+  },
+  "persuader": {"input": null, "output": null}
+}
