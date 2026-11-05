@@ -184,6 +184,23 @@ class ColleagueCutoffTests(RunHelper):
         self.assertFalse([n for n in run.state["notes"] if "unfinished" in n["content"]])
         self.assertFalse([m for m in run.histories["agent_02"] if m.get("content") == "unfinished"])
 
+    def test_a_cutoff_inside_a_tool_call_is_repeated_too(self):
+        # OpenRouter can report finish_reason "tool_calls" for such an answer. Only the native reason says "length".
+        def cut_off(*_args, **_kwargs):
+            tool = {"id": "cut", "type": "function", "function": {"name": "post_note", "arguments": '{"content": "unfin'}}
+            return ok({"choices": [{"finish_reason": "tool_calls", "native_finish_reason": "length",
+                                    "message": {"role": "assistant", "content": "", "tool_calls": [tool]}}]})
+        provider = FakeProvider(cut_off, failing="seller-1", times=2)
+        with patch("swarm_bench.providers.build_opener") as opener:
+            opener.return_value = provider
+            run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True, retry_colleague_cutoff=True),
+                                  completion, profiles={a: PROFILE for a in ("agent_01", "agent_02", "agent_03", "agent_04")},
+                                  call_limit=6)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
+        self.assertEqual([(e["attempt"], e["cause"]) for e in self.retries(run)], [(1, "token_cutoff"), (2, "token_cutoff")])
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "tool_error"])
+        self.assertNotIn("unfin", json.dumps(run.histories["agent_02"]))
+
     def test_a_third_cutoff_in_a_row_ends_the_run(self):
         run, provider = self.run_cutoffs("seller-1", 3)
         self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))

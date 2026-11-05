@@ -780,7 +780,8 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
     try:
         if (data.get("stop_reason") == "max_tokens" or
                 data.get("status") == "incomplete" and (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens" or
-                any(c.get("finish_reason") == "length" for c in data.get("choices", []))):
+                # OpenRouter can report finish_reason "tool_calls" for an answer cut off inside a tool call.
+                any("length" in (c.get("finish_reason"), c.get("native_finish_reason")) for c in data.get("choices", []))):
             message = "Response hit the token limit before finishing. Increase the output budget."
             if omitted_thinking:
                 message += " Thinking tokens used the rest of the cap and were omitted from the visible output count."
