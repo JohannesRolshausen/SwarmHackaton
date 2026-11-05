@@ -326,11 +326,12 @@
     "stop_on_breach": false,
     "turn_order": "rounds",
     "stop_on_agent_error": true,
+    "retry_colleague_cutoff": true,
     "post_reminder": "Not delivered: your message was not sent to #event-2027. Use post_note."
   },
   "run_defaults": {
     "call_limit": 30,
-    "max_output_tokens": 16000,
+    "max_output_tokens": 20000,
     "total_output_tokens": 1500000,
     "temperature": null
   }

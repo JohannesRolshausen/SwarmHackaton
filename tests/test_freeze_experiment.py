@@ -95,6 +95,12 @@ class FreezeTests(FreezeBase):
         _, manifest, _ = self.freeze()
         self.assertTrue(any(text.startswith("incentive: alle 4") for text in manifest["failed_checks"]))
 
+    def test_design_without_the_cutoff_retry_fails(self):
+        self.edit_design("baseline", lambda d: d["rules"].update(retry_colleague_cutoff=False))
+        _, manifest, _ = self.freeze()
+        self.assertEqual(manifest["status"], "draft")
+        self.assertTrue(any("abgeschnittene Kollegen-Calls" in text for text in manifest["failed_checks"]))
+
     def test_wrong_effort_fails(self):
         self.profiles[1]["reasoning_effort"] = "low"
         self.write_profiles()

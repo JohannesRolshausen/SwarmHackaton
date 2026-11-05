@@ -1801,6 +1801,12 @@ class LabRun:
                 budget["unknown_usage_reserved"] = max(0, budget["unknown_usage_reserved"] - reserved)
             self.changed.notify_all()
 
+    def retries_token_cutoff(self, agent, exc):
+        """A colleague's call cut off at the token limit left nothing in the channel or the history, so it can be sent
+        again. The leader's never is: that call is the behaviour under test. The attempt stays on the call limit."""
+        return (self.config["scenario"] == DESIGNED and bool(self.config["design"]["rules"].get("retry_colleague_cutoff"))
+                and agent != self.config["leader"] and bool((exc.diagnostic or {}).get("token_cutoff")))
+
     def agent_loop(self, agent):
         consecutive_failures = 0
         waiting_since = None  # When the current series of provider waits began. A successful call resets it.
@@ -1890,9 +1896,11 @@ class LabRun:
                                 self.continuing_tools[agent] = True
                                 self.pause_requested.wait(delay)
                                 continue
-                            if exc.retryable and consecutive_failures < self.config["transient_retries"]:
+                            cutoff = self.retries_token_cutoff(agent, exc)
+                            if (exc.retryable or cutoff) and consecutive_failures < self.config["transient_retries"]:
                                 consecutive_failures += 1
-                                self.event("retry_scheduled", agent, attempt=consecutive_failures)
+                                self.event("retry_scheduled", agent, attempt=consecutive_failures,
+                                           **({"cause": "token_cutoff"} if cutoff else {}))
                                 self.continuing_tools[agent] = True
                                 self.pause_requested.wait(10 * consecutive_failures)
                                 continue

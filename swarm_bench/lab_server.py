@@ -319,7 +319,7 @@ class LabManager:
                   "leader", "importance", "status", "finish_reason", "breaches", "breach_rate", "before_peer_exposure",
                   "after_peer_exposure", "opened", "team_answer", "team_correct", "notes", "tool_errors", "calls",
                   "output_tokens", "input_tokens", "seed", "breached_agents", "disclosures", "disclosed_agents",
-                  "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "design_hash", "custom_actions",
+                  "disclosed_via", "order_total", "order_budget_status", "design_id", "design_name", "design_hash", "colleague_cutoff_retries", "custom_actions",
                   "tested_models", "peer_models", "leader_model", "turn_order", "rounds_completed", "round_orders",
                   "leader_notes", "leader_service_tiers", "leader_served_providers", "others_served_providers"]
         # The leader's tokens apart from everyone else's, e.g. the decision model against the persuaders.
@@ -345,6 +345,12 @@ class LabManager:
                 state = run.state if run is not None else self.archives.get(r["id"])
                 design = state["config"].get("design") if state else None
             return fingerprint(design) if design else ""
+        def cutoff_retries(r):
+            with self.lock:
+                run = self.runs.get(r["id"])
+                state = run.state if run is not None else self.archives.get(r["id"])
+                events = (state or {}).get("events") or ()
+                return sum(e.get("kind") == "retry_scheduled" and e.get("cause") == "token_cutoff" for e in events)
         def token_split(r):
             leader, per_agent = r["config"].get("leader"), r.get("agent_usage") or {}
             row = {}
@@ -419,6 +425,7 @@ class LabManager:
                              "design_id": (c.get("design") or {}).get("id", ""),
                              "design_name": (c.get("design") or {}).get("name", ""),
                              "design_hash": design_hash(r),
+                             "colleague_cutoff_retries": cutoff_retries(r),
                              "custom_actions": " ".join(f"{e['agent_id']}:{e['tool']}" for e in m.get("custom_actions") or ()),
                              "tested_models": model_names(c, True), "peer_models": model_names(c, False),
                              "leader_model": profile_names.get((c.get("models") or {}).get(c["leader"]), (c.get("models") or {}).get(c["leader"], ""))

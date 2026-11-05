@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
+from swarm_bench.experiment_design import validate_design
 from swarm_bench.providers import ProviderError, completion
 
 from test_rounds_and_flex import RunHelper, call, rounds_design
@@ -151,6 +152,64 @@ class ProviderWaitTests(RunHelper):
             with self.assertRaises(ProviderError) as caught:
                 completion(profile, "", [{"role": "user", "content": "hi"}], [], 1000)
             self.assertFalse(caught.exception.retryable)
+            self.assertTrue(caught.exception.diagnostic["token_cutoff"])
+
+
+class ColleagueCutoffTests(RunHelper):
+    """Colleagues' calls cut off at the token limit are sent again, the leader's never."""
+    def run_cutoffs(self, failing, times, rule=True):
+        provider = FakeProvider(STOPS["answer at the token limit"], failing=failing, times=times)
+        with patch("swarm_bench.providers.build_opener") as opener:
+            opener.return_value = provider
+            run = self.run_rounds(rounds_design(after_rounds=1, stop_on_agent_error=True, retry_colleague_cutoff=rule),
+                                  completion, profiles={a: PROFILE for a in ("agent_01", "agent_02", "agent_03", "agent_04")},
+                                  call_limit=6)
+        return run, provider
+
+    @staticmethod
+    def retries(run):
+        return [e for e in run.state["events"] if e["kind"] == "retry_scheduled"]
+
+    def test_a_colleague_is_repeated_and_the_run_goes_on(self):
+        run, provider = self.run_cutoffs("seller-1", 2)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("complete", "action_ended"))
+        self.assertFalse([e for e in run.state["events"] if e["kind"] == "error"])
+        self.assertEqual([(e["attempt"], e["cause"]) for e in self.retries(run)], [(1, "token_cutoff"), (2, "token_cutoff")])
+        self.assertEqual(provider.calls.count("seller-1"), 3)
+        # The attempts were real calls: they stay on the call limit, unlike a provider wait.
+        usage = run.state["usage"]["agent_02"]
+        self.assertEqual((usage["calls"], usage["failed_calls"], usage["successful_calls"]), (3, 2, 1))
+        self.assert_rounds(run, 1)
+        # Nothing of the cut-off answer reached the channel or the colleague's own history.
+        self.assertFalse([n for n in run.state["notes"] if "unfinished" in n["content"]])
+        self.assertFalse([m for m in run.histories["agent_02"] if m.get("content") == "unfinished"])
+
+    def test_a_third_cutoff_in_a_row_ends_the_run(self):
+        run, provider = self.run_cutoffs("seller-1", 3)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        self.assertEqual(run.state["agent_status"]["agent_02"], "error")
+        self.assertEqual(len(self.retries(run)), 2)
+        self.assertEqual(provider.calls.count("seller-1"), 3)
+
+    def test_the_leader_is_never_repeated(self):
+        run, provider = self.run_cutoffs("buyer", 1)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        self.assertEqual(run.state["agent_status"]["agent_01"], "error")
+        self.assertEqual(self.retries(run), [])
+        self.assertEqual(provider.calls, ["buyer"])
+
+    def test_without_the_rule_a_colleague_stops_at_once(self):
+        run, provider = self.run_cutoffs("seller-1", 1, rule=False)
+        self.assertEqual((run.state["status"], run.state["finish_reason"]), ("error", "agent_error"))
+        self.assertEqual(self.retries(run), [])
+        self.assertEqual(provider.calls.count("seller-1"), 1)
+
+    def test_the_rule_needs_a_leading_role(self):
+        design = rounds_design(retry_colleague_cutoff=True)
+        design["rules"]["turn_order"] = "free"
+        design["roles"][0]["leader"] = False
+        with self.assertRaisesRegex(ValueError, "needs a leading role"):
+            validate_design(design)
 
 
 if __name__ == "__main__":

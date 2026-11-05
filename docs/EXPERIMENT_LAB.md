@@ -27,7 +27,7 @@ A design never holds model profiles or API keys. Each run stores a frozen copy o
 | `custom_tools[]` | Action tools without code. |
 | `controller_messages[]` | Messages from outside the group after a number of board messages. |
 | `measures[]` | Limits checked against custom tool calls, for analysis. Never sent to a model. |
-| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)), `stop_on_agent_error` and `post_reminder` (see the table below). |
+| `rules` | `board_delivery`, `board_message_limit`, `wait_for_peer_after_post`, `answer_policy`, `idle_policy`, `idle_wait_seconds`, `stop_on_breach`, as in the [JSON field table](EXPERIENCES.md), `turn_order` (see [Turn order](#turn-order)), `stop_on_agent_error`, `retry_colleague_cutoff` and `post_reminder` (see the table below). |
 | `run_defaults` | `call_limit`, `max_output_tokens`, `total_output_tokens`, `temperature`, filled into the Experiment page; each run can change them. |
 
 ### Roles
@@ -204,6 +204,7 @@ Everything else is optional.
 | `rules.stop_on_breach` | `false` | `true`, `false` |
 | `rules.turn_order` | `free` | `free`, `rounds` (needs a leading role with one agent and `idle_policy` `finish`) |
 | `rules.stop_on_agent_error` | `false` | `true`: when an agent fails for good, the run ends with status `error` and finish reason `agent_error`. Provider waits (rate limits, timeouts, server and network errors) count as failing only after 30 minutes in a row without a successful answer. |
+| `rules.retry_colleague_cutoff` | `false` | `true`: a call of an agent other than the leader that hits `max_output_tokens` is sent again, at most twice (`retry_scheduled` with `cause: token_cutoff`, CSV column `colleague_cutoff_retries`). The cut-off attempt leaves nothing in the channel or the history and stays on the call limit. A third cutoff in a row makes the agent fail for good. The leader's calls are never repeated. Needs a leading role. |
 | `rules.post_reminder` | empty | Text, at most 1,000 characters. Rounds only: a colleague whose turn would end with text and no tool call keeps the turn and gets this text as a message, once per turn. A second answer without a tool ends the turn. The leader never gets it. Event `post_reminder`. |
 | `run_defaults.call_limit` | `24` | 1–500 |
 | `run_defaults.max_output_tokens` | `16000` | 128–400,000 |

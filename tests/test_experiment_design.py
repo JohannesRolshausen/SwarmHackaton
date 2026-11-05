@@ -430,6 +430,7 @@ class ExperimentDesignTests(unittest.TestCase):
             # The same hash as design_hash in a freeze manifest, over the whole design and not just its id and name.
             frozen = json.dumps(manager.runs[run["id"]].config["design"], sort_keys=True, ensure_ascii=False)
             self.assertEqual(row["design_hash"], hashlib.sha256(frozen.encode("utf-8")).hexdigest()[:12])
+            self.assertEqual(row["colleague_cutoff_retries"], "0")
             self.assertEqual(request("/api/designs/deal/delete", {})["designs"], [])
             with self.assertRaises(HTTPError) as error:
                 request("/api/designs", {"design": deal_design(roles=[])})

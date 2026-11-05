@@ -784,7 +784,7 @@ def completion(profile, key, messages, tools, output_budget, temperature=None, w
             message = "Response hit the token limit before finishing. Increase the output budget."
             if omitted_thinking:
                 message += " Thinking tokens used the rest of the cap and were omitted from the visible output count."
-            raise ProviderError(message, usage=reported_usage)
+            raise ProviderError(message, usage=reported_usage, diagnostic={"token_cutoff": True})
         if profile["kind"] == "openai_responses":
             if data.get("status") in ("failed", "incomplete"):
                 raise incomplete(f"Responses API call ended with status {data['status']}.", data, reported_usage)

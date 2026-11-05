@@ -39,6 +39,7 @@ Object.assign(HELP, {
   "lab-msg-final": {label: "Calls after this message", text: "The most model calls a recipient gets after this message. Then it stops, without being told. Leave it empty for no extra limit; the call limit still applies."},
   "lab-msg-rounds": {label: "After rounds", text: "With turn order Rounds: the message is sent once this many rounds are complete, that is after the last other agent of that round. Leave it empty to count board messages instead."},
   "lab-post-reminder": {label: "Reminder to post", text: "Rounds only. A colleague whose turn would end with text and no tool call keeps the turn and gets this text as a message, once per turn. A second answer without a tool ends the turn. The leader never gets it. Empty: no reminder."},
+  "lab-colleague-cutoff": {label: "Repeat a colleague's cut-off call", text: "On: when a call of an agent other than the leader hits max_output_tokens, it is sent again, at most twice. The cut-off attempt leaves nothing in the channel or the history and stays on the call limit. If all three attempts are cut off, the agent fails for good. The leader's calls are never repeated. Needs a leading role."},
   "lab-agent-error": {label: "End the run when an agent fails", text: "Off: the other agents go on without an agent that failed for good (a provider error that is not a wait, or 30 minutes of waits in a row without a successful answer). On: the run ends with status error and finish reason agent_error, so it can be restarted instead of counted. A shorter wait for the provider (rate limits, timeouts, server and network errors) never counts as failing."},
   "lab-turn-order": {label: "Turn order", text: "Free: every agent acts whenever something new arrives, all at the same time. How often an agent speaks then depends on how fast its provider answers.\n\nRounds: the leader takes a turn, then every other agent takes one turn, in a new random order each round, then the leader again. Only one agent works at a time. A turn ends when the agent posts or answers without a tool. A leader whose first message the others wait for keeps the turn until it posts. Waiting for a provider (rate limit, timeout, Flex queue, an empty reply) keeps the turn, so slow providers change nothing in the conversation. The order comes from the operating system's random source, not from the run seed, and is stored in the run."},
   "lab-msg-roles": {label: "Recipients", text: "Every agent of the checked roles receives the message as a user message with its next request. Placeholders are filled per agent."},
@@ -81,7 +82,7 @@ function labBlankDesign() {
     shared_prompt: "Work with the other participants on the task. Communicate through the shared notes board.",
     shared_files: {}, roles: [labBlankRole("participant", 3)], custom_tools: [], controller_messages: [], measures: [],
     rules: {board_delivery: "tool_only", board_message_limit: null, wait_for_peer_after_post: false, answer_policy: "none",
-      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free", stop_on_agent_error: false, post_reminder: ""},
+      idle_policy: "finish", idle_wait_seconds: 2, stop_on_breach: false, turn_order: "free", stop_on_agent_error: false, retry_colleague_cutoff: false, post_reminder: ""},
     run_defaults: {call_limit: 24, max_output_tokens: 16000, total_output_tokens: 1500000, temperature: 0.7}};
 }
 // Editing model: files as lists, so a file can be renamed while typing; a role's own task as an on/off switch.
@@ -288,6 +289,7 @@ function labPanelRules() {
       ${labDraft.rules.idle_policy === "continue" ? labInput("Wait before continuation · seconds", "rules.idle_wait_seconds", {help: "idle-wait", kind: "int", type: "number", attrs: 'min="0" max="60"'}) : ""}
       ${labCheck("Stop the run at the first breach", "rules.stop_on_breach")}
       ${labCheck("End the run with an error when an agent fails for good", "rules.stop_on_agent_error", {help: "lab-agent-error"})}
+      ${labCheck("Repeat a colleague's call cut off at the token limit", "rules.retry_colleague_cutoff", {help: "lab-colleague-cutoff"})}
       ${labInput("Reminder when a colleague answers without a tool", "rules.post_reminder", {help: "lab-post-reminder", placeholder: "No reminder", attrs: 'maxlength="1000"'})}
     </div><div>
       <h3 class="lab-subhead">Run defaults</h3><p class="hint">Filled into the Experiment page when you pick this design. Each run can change them.</p>

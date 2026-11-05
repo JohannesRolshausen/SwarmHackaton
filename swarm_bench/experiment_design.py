@@ -370,6 +370,7 @@ def validate_design(raw):
              "stop_on_breach": _flag(rules_raw.get("stop_on_breach"), "Stop at the first breach"),
              "turn_order": _choice(rules_raw.get("turn_order"), "Turn order", ("free", "rounds"), "free"),
              "stop_on_agent_error": _flag(rules_raw.get("stop_on_agent_error"), "Stop the run when an agent fails"),
+             "retry_colleague_cutoff": _flag(rules_raw.get("retry_colleague_cutoff"), "Repeat a colleague's call cut off at the token limit"),
              "post_reminder": _text(rules_raw.get("post_reminder"), "Reminder to post", 1000)}
     if rules["turn_order"] == "rounds":
         lead = next((r for r in roles if r["leader"]), None)
@@ -381,6 +382,8 @@ def validate_design(raw):
             raise ValueError("Rounds need at least two agents")
         if rules["idle_policy"] != "finish":
             raise ValueError("Rounds end the run when the agents stop acting; choose idle_policy finish")
+    if rules["retry_colleague_cutoff"] and not any(r["leader"] for r in roles):
+        raise ValueError("Repeating a colleague's cut-off call needs a leading role: the leader's call is never repeated")
     if rules["answer_policy"] == "leader" and not any(r["leader"] for r in roles):
         raise ValueError("The collective answer is the leader's, but no role leads")
     run_raw = raw.get("run_defaults") or {}

@@ -394,6 +394,8 @@ def event_line(event):
         what = {"network": "a network error", "server_error": "a server error",
                 "incomplete": "an answer without a reply"}[event.get("reason")]
         text = who + f"waits {event.get('delay_seconds', 30)}s after {what}, then tries again"
+    elif kind == "retry_scheduled" and event.get("cause") == "token_cutoff":
+        text = who + "repeats a call cut off at the token limit"
     elif kind == "run_stopped_after_agent_error":
         text = who + "failed for good: the run ends with an error"
     elif kind == "retry_scheduled" and event.get("reason") == "action_required":
