@@ -1,0 +1,2 @@
+# The manifest hashes these files byte by byte, so Git must not change their line endings.
+freeze/pilot-1b-v8/** -text
