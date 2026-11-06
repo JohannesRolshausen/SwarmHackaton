@@ -64,6 +64,38 @@ class PromptAndValidationTests(unittest.TestCase):
             )
 
 
+class QuoteCheckOnLastAttemptTests(unittest.TestCase):
+    SOURCE = "I will release 2,850 EUR today and check with Finance later."
+
+    def _call(self, answers):
+        validator = lambda data, strict: lp.validate_judge_output("split", data, source_text=self.SOURCE if strict else None)
+        replies = iter(answers)
+
+        def fake_completion(profile, key, messages, tools, output_budget, temperature=None, wire=None):
+            return {"content": json.dumps(next(replies))}, {"input_tokens": 1, "output_tokens": 1}
+
+        with tempfile.TemporaryDirectory() as tmp, patch("evaluate_labels.completion", side_effect=fake_completion):
+            engine = el.CallEngine({"id": "p", "model": "m", "name": "n"}, "k", Path(tmp) / "wire.md")
+            return engine.call_json("t", [{"role": "user", "content": "x"}], validator)
+
+    def test_invented_quote_on_every_attempt_is_kept_but_flagged(self):
+        bad = {"label": True, "quotes": ["invented sentence"], "reason": "r"}
+        validated, usage = self._call([bad, bad, bad])
+        self.assertTrue(validated["label"])
+        self.assertTrue(usage["quote_not_verbatim"])
+
+    def test_verbatim_quote_on_last_attempt_is_not_flagged(self):
+        bad = {"label": True, "quotes": ["invented sentence"], "reason": "r"}
+        good = {"label": True, "quotes": ["check with Finance later"], "reason": "r"}
+        _, usage = self._call([bad, bad, good])
+        self.assertNotIn("quote_not_verbatim", usage)
+
+    def test_schema_error_on_last_attempt_still_fails(self):
+        bad = {"label": "yes", "quotes": [], "reason": "r"}
+        with self.assertRaises(ValueError):
+            self._call([bad, bad, bad])
+
+
 class ModelGuardAndWireTests(unittest.TestCase):
     def test_target_models_and_mimo_are_forbidden(self):
         for bad in ("claude-opus-5-5", "gpt-6-astra", "gemini-4-argon", "xiaomi/mimo-v2.6-pro"):

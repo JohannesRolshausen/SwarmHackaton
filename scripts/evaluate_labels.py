@@ -48,9 +48,16 @@ from swarm_bench.providers import ProviderError, ProviderRegistry, completion, l
 from swarm_bench.wire_log import WireLog  # noqa: E402
 
 DEFAULT_SEED = 20261106
-DEFAULT_JUDGE_PROFILE = "model-c7cccbcf"     #gemini-3.8-flash thinking low (Google)
-DEFAULT_SECOND_PROFILE = "model-44311202"    #deepseek/deepseek-v4-flash low (OpenRouter)
-DEFAULT_REVIEWER_PROFILE = "model-7f18f46d"  #anthropic/claude-haiku-4.5 (OpenRouter)
+DEFAULT_JUDGE_PROFILE = "label-judge-deepseek-v41-flash-high"  #deepseek/deepseek-v4.1-flash, effort high (OpenRouter)
+DEFAULT_SECOND_PROFILE = "label-second-gemini-38-flash-high"   #gemini-3.8-flash, thinking high (Google)
+DEFAULT_REVIEWER_PROFILE = "label-reviewer-sonnet-55-high"     #claude-sonnet-5-5, effort high (Anthropic API)
+
+# Thinking counts against the output budget and a cut-off answer is not retried, so high efforts need room.
+# The largest answer in the 72-case judge test used 14,366 tokens. The provider timeout grows with the budget
+# and stops at 10 minutes per call.
+MAX_OUTPUT_TOKENS = 32768
+# The draft reads about 87,000 input tokens at once. At effort high, the judge used up 32,768 tokens on thinking alone.
+MAX_OUTPUT_TOKENS_CODEBOOK_DRAFT = 131072
 
 FORBIDDEN_SUBSTRINGS = ("claude-opus-5-5", "gpt-6-astra", "gemini-4-argon", "mimo-v2.6")
 
@@ -325,7 +332,7 @@ def prepare_inputs(data_dir, out_dir, prereg_path, seed=DEFAULT_SEED):
 class CallEngine:
     """Thread-safe, resumable model caller with retry backoff, JSON validation and wire logging."""
 
-    def __init__(self, profile, key, wire_path, max_output_tokens=4096):
+    def __init__(self, profile, key, wire_path, max_output_tokens=MAX_OUTPUT_TOKENS):
         self.profile = profile
         self.key = key
         self.wire = WireLog(wire_path, f"eval-{profile['id']}")
@@ -344,7 +351,7 @@ class CallEngine:
         has_reported_cost = False
 
         for parse_attempt in range(max_parse_retries):
-            is_strict = parse_attempt + 1 < max_parse_retries
+            is_last = parse_attempt + 1 >= max_parse_retries
             msg, usage = self._call_with_backoff(prefix, current_messages)
             if isinstance(usage, dict):
                 for tk in ("input_tokens", "output_tokens", "cache_read_input_tokens", "reasoning_tokens"):
@@ -356,7 +363,15 @@ class CallEngine:
             raw_content = msg.get("content") or ""
             try:
                 parsed = extract_json_object(raw_content)
-                validated = validator(parsed, is_strict)
+                try:
+                    validated = validator(parsed, True)
+                except ValueError:
+                    if not is_last:
+                        raise
+                    # Keep the case so the batch can finish, but mark it: the schema still has to hold,
+                    # and the report counts the cases whose cited quote is not verbatim in the source.
+                    validated = validator(parsed, False)
+                    total_usage["quote_not_verbatim"] = True
                 if not has_reported_cost:
                     total_usage.pop("cost_usd", None)
                 return validated, total_usage
@@ -433,7 +448,7 @@ def draft_codebook(out_dir, judge_prof, judge_key):
     sample_rows = read_jsonl(work_sub / "judge_input" / "codebook_sample_runs.jsonl")
     if not sample_rows:
         raise SystemExit("Run 'prepare' before 'draft-codebook'.")
-    engine = CallEngine(judge_prof, judge_key, work_sub / "judge_outputs" / "wire_log.md", max_output_tokens=8192)
+    engine = CallEngine(judge_prof, judge_key, work_sub / "judge_outputs" / "wire_log.md", max_output_tokens=MAX_OUTPUT_TOKENS_CODEBOOK_DRAFT)
     msgs = build_codebook_draft_messages(sample_rows)
     validated, usage = engine.call_json("codebook-draft", msgs, lambda d, _s: validate_codebook_draft(d))
     draft_payload = {"model": judge_prof["model"], "usage": usage, **validated}
@@ -492,7 +507,7 @@ def freeze_codebook(out_dir, mode="recommended", hypothesis="", seed=DEFAULT_SEE
     (work_sub / "codebook.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     amendment_lines = [
-        "### Amendment 6, 6 November 2026 (before exploratory strategy labelling)",
+        "### Amendment 7, 6 November 2026 (before exploratory strategy labelling)",
         "",
         f"**Frozen codebook of persuasion strategies (section 8).** Drafted on 10 randomly chosen complete main runs (seed `{seed}`: "
         + ", ".join(f"`{r}`" for r in sampled_runs)
@@ -524,7 +539,7 @@ def run_primary_labels(out_dir, judge_prof, judge_key, only_tasks=None, workers=
             raise SystemExit("codebook.json is not marked frozen.")
         codebook = cb_data["codebook"]
 
-    engine = CallEngine(judge_prof, judge_key, work_sub / "judge_outputs" / "wire_log.md", max_output_tokens=4096)
+    engine = CallEngine(judge_prof, judge_key, work_sub / "judge_outputs" / "wire_log.md")
     for task_name in selected:
         items = read_jsonl(work_sub / "judge_input" / f"{task_name}.jsonl")
         out_path = work_sub / "judge_outputs" / f"{task_name}.jsonl"
@@ -573,8 +588,8 @@ def run_audit(out_dir, profiles, auto_confirm=False, seed=DEFAULT_SEED, workers=
     second_prof, second_key = profiles["second"]
     rev_prof, rev_key = profiles["reviewer"]
 
-    second_engine = CallEngine(second_prof, second_key, review_dir / "wire_log_second.md", max_output_tokens=4096)
-    rev_engine = CallEngine(rev_prof, rev_key, review_dir / "wire_log_reviewer.md", max_output_tokens=2048) if auto_confirm else None
+    second_engine = CallEngine(second_prof, second_key, review_dir / "wire_log_second.md")
+    rev_engine = CallEngine(rev_prof, rev_key, review_dir / "wire_log_reviewer.md") if auto_confirm else None
 
     inputs_by_task = {t: {r["case"]: r for r in read_jsonl(in_dir / f"{t}.jsonl")} for t in ALL_JUDGE_TASKS}
     outputs_by_task = {t: load_jsonl_map(j_dir / f"{t}.jsonl") for t in ALL_JUDGE_TASKS}

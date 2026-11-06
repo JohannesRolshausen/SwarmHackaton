@@ -15,6 +15,8 @@ WIRE_BLOCK_RE = re.compile(r"^## ← (agent_01/\d+) · response 200[^\n]*\n(.*?)
 JSON_FENCE_RE = re.compile(r"^(`{3,})json\n(.*?)\n\1$", re.M | re.S)
 
 FLASH_PRICES_PER_M = {"input": 0.75, "cache_read": 0.075, "output": 3.75}
+# Used for calls without a reported cost. Sonnet: prices as listed on OpenRouter on 6 November 2026.
+PRICES_PER_M = {"claude-sonnet-5-5": {"input": 2.0, "cache_read": 0.1, "output": 10.0}}
 
 
 def pct(value):
@@ -261,7 +263,7 @@ def compute_stability_and_near_copies(outcomes, data_dir, csv_by_id):
 
 
 def estimate_call_cost_usd(records):
-    """Sum reported cost_usd (OpenRouter) or compute from Gemini Flash token rates."""
+    """Sum reported cost_usd (OpenRouter) or compute from the model's token rates, by default Gemini Flash."""
     total = 0.0
     in_tok = out_tok = 0
     for rec in records:
@@ -275,10 +277,11 @@ def estimate_call_cost_usd(records):
             total += float(usage["cost_usd"])
         else:
             uncached = max(0, inp - cached)
+            prices = PRICES_PER_M.get(rec.get("model"), FLASH_PRICES_PER_M)
             total += (
-                uncached * FLASH_PRICES_PER_M["input"]
-                + cached * FLASH_PRICES_PER_M["cache_read"]
-                + out * FLASH_PRICES_PER_M["output"]
+                uncached * prices["input"]
+                + cached * prices["cache_read"]
+                + out * prices["output"]
             ) / 1_000_000.0
     return {"calls": len(records), "input_tokens": in_tok, "output_tokens": out_tok, "estimated_usd": round(total, 4)}
 
@@ -498,11 +501,15 @@ def build_full_results(out_dir, data_dir):
     all_jsonl_files = list(j_dir.glob("*.jsonl")) + list((work_sub / "review").glob("*.jsonl"))
     cost_by_file = {}
     total_usd = 0.0
+    quotes_not_verbatim = {}
     for jf in sorted(all_jsonl_files):
         recs = [json.loads(line) for line in jf.read_text(encoding="utf-8").splitlines() if line.strip()]
         est = estimate_call_cost_usd(recs)
         cost_by_file[jf.name] = est
         total_usd += est["estimated_usd"]
+        flagged = sum(1 for rec in recs if (rec.get("usage") or {}).get("quote_not_verbatim"))
+        if flagged:
+            quotes_not_verbatim[jf.name] = flagged
 
     return {
         "models_used": audit_summary["models_used"],
@@ -534,6 +541,7 @@ def build_full_results(out_dir, data_dir):
             "second_model_misses_20": audit_summary["missed_20_summary"],
         },
         "judge_costs": {"by_file": cost_by_file, "total_estimated_usd": round(total_usd, 4)},
+        "quotes_not_verbatim": quotes_not_verbatim,
     }
 
 
@@ -550,6 +558,7 @@ def render_markdown_report(res):
         f"- **Bestätigungs-/Audit-Prüfung:** `{res['confirmation_mode']}` (`{res['models_used']['reviewer']['name']}` / `{res['models_used']['reviewer']['model']}`)",
         f"- **Verblindung:** Alle Judge- und Zweitmodell-Eingaben (`judge_input/*.jsonl`) enthielten ausschließlich opake Fall-Hashes und Textfelder – weder Bedingung noch Zielmodell noch Bestellbetrag.",
         f"- **Geschätzte API-Gesamtkosten der kompletten Label-Pipeline:** **{res['judge_costs']['total_estimated_usd']:.2f} USD**",
+        f"- **Fälle mit nicht wörtlich belegtem Zitat nach allen Versuchen:** {sum(res['quotes_not_verbatim'].values())} ({', '.join(f'{name}: {n}' for name, n in sorted(res['quotes_not_verbatim'].items())) or 'keine'})",
         "",
         "## 2. Über-Budget-Kommentare & Label „umgefallen“",
         "",
