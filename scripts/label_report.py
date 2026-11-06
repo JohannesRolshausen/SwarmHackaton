@@ -16,7 +16,9 @@ JSON_FENCE_RE = re.compile(r"^(`{3,})json\n(.*?)\n\1$", re.M | re.S)
 
 FLASH_PRICES_PER_M = {"input": 0.75, "cache_read": 0.075, "output": 3.75}
 # Used for calls without a reported cost. Sonnet: prices as listed on OpenRouter on 6 November 2026.
-PRICES_PER_M = {"claude-sonnet-5-5": {"input": 2.0, "cache_read": 0.1, "output": 10.0}}
+PRICES_PER_M = {"claude-sonnet-5-5": {"input": 2.0, "cache_read": 0.1, "output": 10.0},
+                "gpt-6.1-terra": {"input": 1.0, "cache_read": 0.1, "output": 5.0}}
+NOT_RUN_NOTE = "**Nicht gelaufen.** Der Judge hat dieses Label noch nicht vergeben. Es gibt dafür noch keine Ergebnisse, auch keine Nullen."
 
 
 def pct(value):
@@ -514,6 +516,7 @@ def build_full_results(out_dir, data_dir):
     return {
         "models_used": audit_summary["models_used"],
         "confirmation_mode": audit_summary["confirmation_mode"],
+        "reviewer_decisions_by_model": audit_summary.get("reviewer_decisions_by_model") or {},
         "codebook": codebook_data,
         "over_budget_runs": 0,
         "confirmed_labels": {
@@ -536,6 +539,7 @@ def build_full_results(out_dir, data_dir):
         "stability": stability,
         "lena_reasoning": reasoning_table,
         "persuasion_strategies": strategy_table,
+        "labels_run": {"lena_reasoning": bool(reasoning_map), "persuasion_strategies": bool(strat_map)},
         "quality_audit": {
             "positive_samples_20": audit_summary["samples_20_summary"],
             "second_model_misses_20": audit_summary["missed_20_summary"],
@@ -557,6 +561,7 @@ def render_markdown_report(res):
         f"- **Zweites Modell (Übersehene Fälle, anderer Provider):** `{res['models_used']['second']['name']}` (`{res['models_used']['second']['model']}`, Provider `{res['models_used']['second']['base_url']}`)",
         f"- **Bestätigungs-/Audit-Prüfung:** `{res['confirmation_mode']}` (`{res['models_used']['reviewer']['name']}` / `{res['models_used']['reviewer']['model']}`)",
         f"- **Verblindung:** Alle Judge- und Zweitmodell-Eingaben (`judge_input/*.jsonl`) enthielten ausschließlich opake Fall-Hashes und Textfelder – weder Bedingung noch Zielmodell noch Bestellbetrag.",
+        f"- **Entscheidungen je Reviewer-Modell:** {', '.join(f'`{m}`: {n}' for m, n in sorted(res['reviewer_decisions_by_model'].items())) or 'keine'}",
         f"- **Geschätzte API-Gesamtkosten der kompletten Label-Pipeline:** **{res['judge_costs']['total_estimated_usd']:.2f} USD**",
         f"- **Fälle mit nicht wörtlich belegtem Zitat nach allen Versuchen:** {sum(res['quotes_not_verbatim'].values())} ({', '.join(f'{name}: {n}' for name, n in sorted(res['quotes_not_verbatim'].items())) or 'keine'})",
         "",
@@ -706,7 +711,11 @@ def render_markdown_report(res):
         "## 8. Lenas Begründungen (`thought_summary` und `comment`)",
         "",
     ]
+    if not res["labels_run"]["lena_reasoning"]:
+        lines += [NOT_RUN_NOTE, ""]
     for kind, title in (("thought_summary", "Nur Thought-Summaries"), ("comment", "Nur Bestell-Kommentare (`comment`)")):
+        if not res["labels_run"]["lena_reasoning"]:
+            break
         lines += [
             f"### {title}",
             "",
@@ -732,17 +741,20 @@ def render_markdown_report(res):
     for entry in res["codebook"]["codebook"]:
         lines.append(f"- **`{entry['code']}` ({entry['name']}):** {entry['definition']}")
 
-    lines += ["", "### Häufigkeit pro Bedingung (gepoolt über alle 3 Zielmodelle, Anteil der Kollegen-Nachrichten)", ""]
-    header_cols = ["Strategie"] + list(CONDITIONS)
-    lines.append("| " + " | ".join(header_cols) + " |")
-    lines.append("|" + "---|" * len(header_cols))
-    for entry in res["codebook"]["codebook"]:
-        code = entry["code"]
-        cells = [f"`{code}`"]
-        for c in CONDITIONS:
-            st = res["persuasion_strategies"][f"Alle | {c}"]
-            cells.append(share(st["counts"][code], st["messages"]))
-        lines.append("| " + " | ".join(cells) + " |")
+    if res["labels_run"]["persuasion_strategies"]:
+        lines += ["", "### Häufigkeit pro Bedingung (gepoolt über alle 3 Zielmodelle, Anteil der Kollegen-Nachrichten)", ""]
+        header_cols = ["Strategie"] + list(CONDITIONS)
+        lines.append("| " + " | ".join(header_cols) + " |")
+        lines.append("|" + "---|" * len(header_cols))
+        for entry in res["codebook"]["codebook"]:
+            code = entry["code"]
+            cells = [f"`{code}`"]
+            for c in CONDITIONS:
+                st = res["persuasion_strategies"][f"Alle | {c}"]
+                cells.append(share(st["counts"][code], st["messages"]))
+            lines.append("| " + " | ".join(cells) + " |")
+    else:
+        lines += ["", NOT_RUN_NOTE]
 
     lines += [
         "",
@@ -753,7 +765,10 @@ def render_markdown_report(res):
         "| Labelart | Gezogen | Bestätigt | Bestätigungsrate |",
         "|---|---|---|---|",
     ]
+    not_run = tuple(task for task, ran in res["labels_run"].items() if not ran)
     for name, row in res["quality_audit"]["positive_samples_20"].items():
+        if name.startswith(not_run or ("\0",)):
+            continue
         lines.append(f"| `{name}` | {row['sampled']} | {row['confirmed']} | {share(row['confirmed'], row['sampled'])} |")
 
     lines += [
@@ -764,6 +779,8 @@ def render_markdown_report(res):
         "|---|---|---|---|",
     ]
     for name, row in res["quality_audit"]["second_model_misses_20"].items():
+        if name.startswith(not_run or ("\0",)):
+            continue
         lines.append(f"| `{name}` | {row['scanned']} | {row['disagreements']} | **{row['confirmed_misses']}** |")
 
     return "\n".join(lines) + "\n"

@@ -10,6 +10,7 @@ Usage examples:
   python scripts/evaluate_labels.py run-all --auto-confirm --workers 20
 """
 import argparse
+from collections import Counter
 import concurrent.futures
 import csv
 import hashlib
@@ -865,6 +866,7 @@ def run_audit(out_dir, profiles, auto_confirm=False, seed=DEFAULT_SEED, workers=
     )
     audit_summary = {
         "confirmation_mode": mode_label,
+        "reviewer_decisions_by_model": dict(Counter(rec["model"] for rec in reviewer_map.values())),
         "models_used": {
             role: {"id": p["id"], "name": p["name"], "model": p["model"], "base_url": p["base_url"]}
             for role, (p, _) in profiles.items()

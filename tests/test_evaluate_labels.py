@@ -282,6 +282,17 @@ class EndToEndMockPipelineTests(unittest.TestCase):
             self.assertEqual(res["confirmed_labels"]["table"]["Alle | Baseline"]["deferred_confirmed"], 3)
             self.assertTrue((out_dir / "exploratory_labels_report.md").exists())
             self.assertTrue((el.sub_folder(out_dir) / "section10_codebook_amendment.md").exists())
+            self.assertNotIn(lr.NOT_RUN_NOTE, (out_dir / "exploratory_labels_report.md").read_text(encoding="utf-8"))
+
+            #labels that did not run are reported as such, not as zeros
+            for task in ("lena_reasoning", "persuasion_strategies"):
+                (el.sub_folder(out_dir) / "judge_outputs" / f"{task}.jsonl").unlink()
+            el.write_final_report(out_dir, data_dir)
+            report = (out_dir / "exploratory_labels_report.md").read_text(encoding="utf-8")
+            self.assertEqual(report.count(lr.NOT_RUN_NOTE), 2)
+            self.assertNotIn("Nur Thought-Summaries", report)
+            self.assertNotIn("Häufigkeit pro Bedingung", report)
+            self.assertNotIn("| `lena_reasoning", report)
 
 
 if __name__ == "__main__":
