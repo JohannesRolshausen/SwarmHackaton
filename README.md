@@ -45,7 +45,7 @@ The CSV export of a run package contains, per run:
 Requirements: Python 3.10 or newer. The lab itself has **no third-party dependencies** (standard library only). For the analysis you need pandas (and e.g. matplotlib or seaborn for the charts), installed separately.
 
 ```sh
-git clone https://github.com/maaxgrin/SwarmHackaton.git
+git clone https://github.com/JohannesRolshausen/SwarmHackaton.git
 cd SwarmHackaton
 python -m swarm_bench lab --port 8766
 ```
