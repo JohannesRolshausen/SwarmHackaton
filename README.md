@@ -131,3 +131,7 @@ python -m unittest discover -s tests -v
 ```
 
 The tests use fake providers and make no paid calls. The thinking of real providers is checked by `python scripts/smoke_thinking.py` (see Thinking of the models).
+
+## How this repository was built
+
+The lab, the analysis scripts and the poster were developed with the support of Claude Code (Anthropic). The study design, the hypotheses, the preregistration and the decisions in its amendments were made by the author. The results are not taken on trust from the generated code: the main analysis is covered by tests in `tests/`, and the poster is built by `scripts/build_poster.py`, which stops if a number on the poster does not follow from the run data or if a quote is not verbatim in its run.
