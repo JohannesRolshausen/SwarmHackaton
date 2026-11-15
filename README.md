@@ -85,6 +85,7 @@ Without the models' thinking the test suspicion (`leader_test_terms`) can hardly
 | Gemini 4 Argon, Gemini 3.8 Flash | Google, OpenAI layer (Chat Completions) | `extra_body.google.thinking_config.include_thoughts: true`, and `thinking_level` when an effort is set (never together with `reasoning_effort`, which would drop the summary) | the thought summary, in whichever form Gemini uses: `<thought>` tags in the content, a content part marked as thought, or `reasoning_content`. The thought signatures of tool calls go back with the next call |
 | MiMo V2.6 Pro | OpenRouter (Chat Completions) | `reasoning: {effort, exclude: false}` | `reasoning` and `reasoning_details` (the full reasoning text). `reasoning_details` goes back with the next call |
 | Claude (for comparison) | Anthropic Messages | adaptive thinking with `display: "summarized"` and `output_config.effort` | the thinking blocks with their signatures |
+| Claude Opus 5.5 on Amazon Bedrock | Bedrock, Anthropic Messages (`https://bedrock-mantle.<region>.api.aws/anthropic/v1`) | the same request as for Anthropic, with the model id `anthropic.claude-opus-5-5` and the Bedrock API key in `x-api-key` | the thinking blocks with their signatures |
 
 Things to know:
 
@@ -92,6 +93,7 @@ Things to know:
 - GPT-6 Astra and Gemini 3 or later (Gemini 3.8 Flash, Gemini 4 Argon) always think, so the profile refuses reasoning Off for them.
 - OpenAI returns reasoning summaries only to verified organizations. Otherwise it answers HTTP 400, and the error banner says to verify the organization.
 - The Models page offers presets for all four plan models.
+- Amazon Bedrock serves Claude through the same Messages API, so its profile uses the Anthropic Messages format. The preset "Claude Opus 5.5 · Bedrock" fills the endpoint for `eu-central-1`; for another region, change the region in the URL. The key is a Bedrock API key, read from `AWS_BEARER_TOKEN_BEDROCK` (e.g. in `.env`). Requests signed with AWS access keys (SigV4) are not supported.
 
 **Tests with fake answers** (`tests/test_thinking_providers.py`): one whole run per provider, with answers in the provider's own format (Gemini in all three forms). Each test checks that every request asks for the thinking, that every reply stores its text, that the provider's reasoning goes back with the next call, that the run read back from disk still has it, that `leader_test_terms` finds a test word in the leader's thinking, and that the Thinking tab shows every text (`renderThinking()` of `app.js`, run in Node; skipped without Node).
 

@@ -13,6 +13,7 @@ from .providers import service_tier_provider
 PROVIDER_HOSTS = (
     ("generativelanguage.googleapis.com", "Google"), ("aiplatform.googleapis.com", "Google"),
     ("api.openai.com", "OpenAI"), ("openrouter.ai", "OpenRouter"), ("api.anthropic.com", "Anthropic"),
+    ("bedrock-mantle", "Amazon Bedrock"),
     ("api.x.ai", "xAI"), ("api.deepseek.com", "DeepSeek"), ("api.mistral.ai", "Mistral"),
     ("api.moonshot.ai", "Moonshot"), ("api.together.xyz", "Together"), ("api.groq.com", "Groq"),
     ("api.fireworks.ai", "Fireworks"), ("api.cerebras.ai", "Cerebras"), ("api.z.ai", "Z.ai"),
