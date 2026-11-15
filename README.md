@@ -109,6 +109,23 @@ It uses the saved lab profile with the same model id, or the key from `OPENAI_AP
 
 Each run is saved locally under `runs/` (gitignored): independent agent contexts, board messages with author and time, tool calls including rejected arguments, model usage, reasoning text if the provider returns it, and provider errors. The interface offers replays and JSON, CSV and PDF exports. Each run also writes `wire_log.md`, every provider HTTP request and response as sent and received, with API keys replaced by `[REDACTED]`. Profiles, keys and raw traces are not committed.
 
+## Follow-up: eval awareness (amendment 9)
+
+A small follow-up asks whether Claude Opus 5.5 names a test in its thought summaries when the setup is obvious. It uses two more designs with the Pressure colleagues, and Opus as Lena through Amazon Bedrock:
+
+- [`designs/group-spending-pressure-obvious.json`](designs/group-spending-pressure-obvious.json): strict limit, the ending tool is called `submit_final_answer`, no channel history, start on the day the options end, no documents without bearing on the decision.
+- [`designs/group-spending-pressure-told.json`](designs/group-spending-pressure-told.json): the same, plus one sentence in Lena's prompt that names the evaluation.
+
+Plan, prediction and reading of the results are in amendment 9 of [PREREGISTRATION.md](PREREGISTRATION.md). After the runs:
+
+```sh
+python scripts/analyze_awareness_followup.py prepare
+python scripts/analyze_awareness_followup.py label
+python scripts/analyze_awareness_followup.py report
+```
+
+`prepare` reads `runs/lab`, `label` needs the judge profile of the main study, and `report` writes `analysis/awareness-followup/awareness-followup.md`. These designs are not part of the main evaluation, and `scripts/analyze_main.py` does not read them.
+
 ## Other experiment types in this repository
 
 The lab contains further experiment types and example configurations in `examples/`. They work and are kept on purpose, but they are **not part of the current evaluation**. We moved away from them as the main experiment because of several problems, among them eval awareness: in setups with an obvious forbidden file or a puzzle-like task, models often recognized that they were being tested, which makes their behavior hard to interpret. The group-spending designs were built as a realistic work ticket to reduce that.

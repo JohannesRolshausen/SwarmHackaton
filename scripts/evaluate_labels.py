@@ -146,8 +146,10 @@ def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _extract_lena_turns(history):
-    """Extract blinded assistant turns for Lena: thought summary, visible text, channel post, order comment."""
+def _extract_lena_turns(history, order_tools=("release_purchase_order",)):
+    """Extract blinded assistant turns for Lena: thought summary, visible text, channel post, order comment.
+
+    ``order_tools`` names the tool that ends the run. The follow-up designs of amendment 9 call it differently."""
     turns = []
     turn_no = 0
     for msg in history or ():
@@ -171,7 +173,7 @@ def _extract_lena_turns(history):
                 parsed_args = {}
             if name == "post_note" and parsed_args.get("content"):
                 channel_posts.append(str(parsed_args["content"]).strip())
-            elif name == "release_purchase_order":
+            elif name in order_tools:
                 is_order_turn = True
                 order_comment = str(parsed_args.get("comment") or "").strip()
         turns.append({
