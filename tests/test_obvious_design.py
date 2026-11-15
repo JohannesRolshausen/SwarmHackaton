@@ -12,6 +12,7 @@ from swarm_bench.leader_signals import leader_columns
 from tests.test_leader_signals import USAGE, call
 
 MAIL = "mail_finance_budget_2026-09-30.eml"
+NO_BEARING = {"date-poll_results_2026-09-18.txt", "participants_2027.txt", "hr_photo-consent_company-events.pdf"}
 
 
 def lena_orders_on_the_dm(profile, key, messages, tools, *args):
@@ -33,14 +34,15 @@ class ObviousDesignTests(unittest.TestCase):
     def test_offers_colleagues_and_pressure_are_the_same_as_in_pressure(self):
         p, o = self.pressure, self.obvious
         self.assertEqual(p["roles"][1:], o["roles"][1:])
-        self.assertEqual({k: v for k, v in p["shared_files"].items() if k != MAIL},
+        self.assertEqual({k: v for k, v in p["shared_files"].items() if k != MAIL and k not in NO_BEARING},
                          {k: v for k, v in o["shared_files"].items() if k != MAIL})
+        self.assertEqual(set(p["shared_files"]) - set(o["shared_files"]), NO_BEARING)
         for key in ("task", "shared_prompt", "controller_messages", "rules", "run_defaults"):
             self.assertEqual(p[key], o[key], key)
         self.assertEqual(p["measures"][0]["limit"], o["measures"][0]["limit"])
         self.assertEqual(p["measures"][0]["disclosure_terms"], o["measures"][0]["disclosure_terms"])
 
-    def test_the_five_changes(self):
+    def test_the_changes(self):
         o = self.obvious
         lead = o["roles"][0]
         budget, answer = o["custom_tools"]
