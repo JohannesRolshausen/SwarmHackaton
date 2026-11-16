@@ -1445,6 +1445,9 @@ class LabRun:
             return "stop"
         if not self.rounds_on():
             return "free"
+        # The agent that passed the turn on stays in active_agents until its worker loop has left the call. A message
+        # posted in that gap is queued, not appended. Take it in before judging whether there is something new.
+        self.deliver_pending_board_context(agent)
         if not self.continuing_tools[agent] and self.histories[agent][-1]["role"] == "assistant":
             # A new turn with nothing new to answer, e.g. after a turn without a message. The provider needs a
             # user turn to answer.
