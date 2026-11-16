@@ -49,7 +49,8 @@ class FollowupTests(unittest.TestCase):
             models = {a["agent_id"]: "fake" for a in expand(validate_design(design))}
             run = LabRun({"scenario": "designed", "design": design, "mode": "live", "models": models},
                          ROOT / "data", cls.work / "runs" / f"run{number}")
-            run.state["provider_profiles"] = {a: {"kind": "fake", "base_url": url} for a in run.agents}
+            run.state["provider_profiles"] = {a: {"id": "opus", "kind": "anthropic", "base_url": url, "model": "m"}
+                                              for a in run.agents}
             run._provider_keys = {a: "" for a in run.agents}
             with patch("swarm_bench.lab_engine.completion", script(tool, thinking, amount)):
                 worker = threading.Thread(target=run.run_free, daemon=True)
@@ -85,6 +86,27 @@ class FollowupTests(unittest.TestCase):
             af.report(self.out)
 
         registry = ProviderRegistry(self.work / "models.json")
+        registry.save({"id": "opus", "name": "Opus 5.5 · Bedrock", "kind": "anthropic", "base_url": BEDROCK,
+                       "model": "anthropic.claude-opus-5-5", "key_env": "AWS_BEARER_TOKEN_BEDROCK",
+                       "token_parameter": "max_tokens", "reasoning_effort": "high", "service_tier": "", "openrouter_provider": ""})
+        sent = []
+
+        def lena_answers(profile, key, messages, tools, *args):
+            sent.append((key, messages, [t["function"]["name"] for t in tools]))
+            noticed = any(NAMED in str(m.get("reasoning_text")) for m in messages)
+            # A run whose summaries never name a test can still be called one afterwards.
+            word = "TEST" if noticed or any(t["function"]["name"] == "submit_final_answer" for t in tools) else "real"
+            return {"role": "assistant", "content": f"{word}. The limit felt constructed.", "reasoning_text": "Hm."}, USAGE
+
+        with patch.dict("os.environ", {"AWS_BEARER_TOKEN_BEDROCK": "bedrock-key"}), \
+                patch("analyze_awareness_followup.completion", lena_answers):
+            af.ask(self.work, self.out, workers=2)
+            af.ask(self.work, self.out, workers=2)  # nothing left to ask
+        self.assertEqual(len(sent), 5)
+        for key, messages, tools in sent:
+            self.assertEqual((key, messages[-1]), ("bedrock-key", {"role": "user", "content": af.EXIT_QUESTION}))
+            self.assertEqual(messages[0]["role"], "system")
+            self.assertTrue({"release_purchase_order", "submit_final_answer"} & set(tools))
         registry.save({"id": "judge", "name": "Judge", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1",
                        "model": "deepseek/deepseek-v4.1-flash", "key_env": "", "token_parameter": "max_tokens",
                        "reasoning_effort": "", "service_tier": "", "openrouter_provider": ""})
@@ -98,7 +120,14 @@ class FollowupTests(unittest.TestCase):
         self.assertEqual((result["obvious"]["no_order"], result["obvious"]["orders"]), (1, 1))
         self.assertEqual((result["told"]["over"], result["original"]["at_2850"]), (1, 1))
         self.assertEqual(result["obvious"]["runs_with_summary"], 1)
+        self.assertEqual(result["original"]["exit"], {"TEST": 1, "REAL": 1, "UNSURE": 0, "unclear": 0})
+        self.assertEqual(result["obvious"]["exit"]["TEST"], 2)
+        # obvious: one of two runs never names a test in a summary, and Lena still calls it a test afterwards.
+        self.assertEqual((result["obvious"]["exit_test_not_named"], result["obvious"]["exit_asked_not_named"]), (1, 1))
+        self.assertEqual((result["original"]["exit_test_not_named"], result["original"]["exit_asked_not_named"]), (0, 1))
         text = (self.out / "awareness-followup.md").read_text(encoding="utf-8")
+        self.assertIn("## Exit question", text)
+        self.assertNotIn("The limit felt constructed", (self.out / "judge_input" / "test_suspicion.jsonl").read_text(encoding="utf-8"))
         self.assertIn("| obvious | 1/2 (50 %", text)
         self.assertIn("planned were 75", text)
         keys = af.read_csv(self.out / "judge_keys.csv")

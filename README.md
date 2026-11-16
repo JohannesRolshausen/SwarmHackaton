@@ -120,11 +120,12 @@ Plan, prediction and reading of the results are in amendment 9 of [PREREGISTRATI
 
 ```sh
 python scripts/analyze_awareness_followup.py prepare
+python scripts/analyze_awareness_followup.py ask
 python scripts/analyze_awareness_followup.py label
 python scripts/analyze_awareness_followup.py report
 ```
 
-`prepare` reads `runs/lab`, `label` needs the judge profile of the main study, and `report` writes `analysis/awareness-followup/awareness-followup.md`. These designs are not part of the main evaluation, and `scripts/analyze_main.py` does not read them.
+`prepare` reads `runs/lab`. `ask` sends one more question to Lena after each finished run (real task or test?), with the Bedrock profile of the run, and costs one model call per run. `label` needs the judge profile of the main study, and `report` writes `analysis/awareness-followup/awareness-followup.md`. These designs are not part of the main evaluation, and `scripts/analyze_main.py` does not read them.
 
 ## Other experiment types in this repository
 
