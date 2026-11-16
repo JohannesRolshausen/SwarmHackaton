@@ -17,6 +17,7 @@ import argparse
 import csv
 import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -44,7 +45,6 @@ CONDS = ("Baseline", "Pressure", "Incentive")
 
 INK = "#1b1a17"
 INK2 = "#55534d"
-INK3 = "#74726b"
 RULE = "#d4d2ca"
 BAND = "#f4f3ee"
 COLOR = {"Baseline": "#8d8c86", "Pressure": "#eb6834", "Incentive": "#2a78d6"}
@@ -55,8 +55,11 @@ PUSH_RAMP = ("#e4e2db", "#bdbbb2", "#94928a", "#62605a", "#1b1a17")
 PUSH_TEXT = (INK, INK, INK, "#ffffff", "#ffffff")
 
 SANS = "Archivo"
-SERIF = "'Source Serif 4'"
 PT = 0.3528  # mm per point
+
+# The whole poster uses these sizes (pt) and these two weights.
+T_TITLE, T_HERO, T_HEAD, T_BODY, T_LABEL, T_NOTE = 190, 72, 44, 28, 22, 16
+REG, BOLD = 400, 800
 
 
 # --------------------------------------------------------------- formatting
@@ -75,6 +78,11 @@ def signed(value, digits=1):
     return f"{sign}{abs(value):.{digits}f}"
 
 
+def signed_eur(value, digits=1):
+    sign = "+" if value > 0 else "\u2212" if value < 0 else ""
+    return f"{sign}\u20ac{abs(value):.{digits}f}"
+
+
 def eur(value):
     return f"\u20ac{value:,.0f}"
 
@@ -82,11 +90,11 @@ def eur(value):
 # ---------------------------------------------------------------- SVG tools
 
 
-def text(x, y, s, size=22, weight=400, anchor="start", fill=INK, family=SANS, italic=False):
+def text(x, y, s, size=T_LABEL, weight=REG, anchor="start", fill=INK, italic=False):
     style = ' font-style="italic"' if italic else ""
     return (
         f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size * PT:.2f}" font-weight="{weight}" '
-        f'text-anchor="{anchor}" fill="{fill}" font-family="{family}"{style}>{esc(s)}</text>'
+        f'text-anchor="{anchor}" fill="{fill}" font-family="{SANS}"{style}>{esc(s)}</text>'
     )
 
 
@@ -266,6 +274,7 @@ def check_numbers(f):
     expect("highest stated amount", max(x["max_amount_without_approval"] for x in deferred), 3000)
     expect("stated 3000", sum(x["max_amount_without_approval"] == 3000 for x in deferred), 41)
     expect("depends on approval", sum(bool(x["higher_depends_on_approval"]) for x in deferred), 63)
+    expect("no condition outside Baseline", sum(not x["higher_depends_on_approval"] and x["condition"] != "Baseline" for x in deferred), 0)
     cells = l["awareness"]["cells"]
     expect("self checked", sum(cells[f"{m} | {c}"]["self_checked"] for m in MODELS for c in CONDS), 450)
     expect("tool tests", l["confirmed_labels"]["tool_test_total"], 0)
@@ -277,6 +286,9 @@ def check_numbers(f):
     expect("Gemini Pressure c", susp["Gemini 4 Argon | Pressure"]["c_used_in_decision"], 45)
     expect("Gemini Pressure c lower", susp["Gemini 4 Argon | Pressure"]["c_directions"]["lower"], 45)
     expect("GPT Baseline c higher", susp["GPT-6 Astra | Baseline"]["c_directions"]["higher"], 4)
+    expect("GPT Baseline c unclear", susp["GPT-6 Astra | Baseline"]["c_directions"]["unclear"], 1)
+    expect("GPT Incentive c lower", susp["GPT-6 Astra | Incentive"]["c_directions"]["lower"], 1)
+    expect("Gemini Incentive c lower", susp["Gemini 4 Argon | Incentive"]["c_directions"]["lower"], 36)
     opus_a = sum(susp[f"Claude Opus 5.5 | {c}"]["a_possibility"] for c in CONDS)
     expect("Opus a", opus_a, 0)
     near = l["stability"]["near_copies"]
@@ -337,94 +349,74 @@ def check_quotes(f):
 # ------------------------------------------------------------------ figures
 
 
-def fig_motif():
-    w, h = 176, 58
-    b = []
-    for i in range(4):
-        x = 16 + i * 31
-        b.append(person(x, 33, 15, "#8f8d85"))
-    b.append(arrow(120, 37, 137, 37, stroke=INK, width=1.3, head=5.2))
-    b.append(person(157, 27, 21, INK))
-    return svg(w, h, "".join(b), "Four colleagues on the left, pushing towards Lena on the right.")
-
-
 def fig_design():
-    w, h = 360, 113
+    w, h = 360, 106
+    grey = "#8f8d85"
     b = []
     # Four colleagues on the left.
-    b.append(text(0, 6.5, "Four colleagues", 26, 800))
-    b.append(text(0, 14.5, "all Xiaomi MiMo V2.6 Pro", 21, 400, fill=INK2))
+    b.append(text(0, 7.5, "Four colleagues", T_BODY, BOLD))
+    b.append(text(0, 16.5, "all Xiaomi MiMo V2.6 Pro", fill=INK2))
     people = [("Jonas", "Dispatch"), ("Miriam", "HR"), ("Tobias", "Warehouse"), ("Sandra", "Works council")]
-    lena = (172, 56)
+    lena = (182, 47)
     for i, (name, role) in enumerate(people):
-        y = 29 + i * 20.5
-        b.append(person(8, y, 7, "#8f8d85"))
-        b.append(text(20, y - 0.6, name, 23, 600))
-        b.append(text(20, y + 7.2, role, 20, 400, fill=INK2))
-        b.append(arrow(74, y, lena[0] - 22, lena[1] + (y - 60) * 0.26, width=0.6))
-    b.append(text(112, 90, "three rounds", 20, 600, "middle"))
-    b.append(text(112, 98, "in the channel", 20, 400, "middle", INK2))
+        y = 29 + i * 16.5
+        b.append(person(7, y, 5.4, grey))
+        b.append(text(17, y + 2.6, f"{name}, {role}"))
+        b.append(arrow(103, y, lena[0] - 21, lena[1] + (y - 53) * 0.22, width=0.6))
 
     # Lena in the middle.
-    b.append(person(lena[0], lena[1], 16, INK))
-    b.append(text(lena[0], 83.5, "Lena Brandt", 28, 800, "middle"))
-    b.append(text(lena[0], 91.5, "Head of Operations", 20, 400, "middle", INK2))
-    b.append(text(lena[0] + 10, 103.5, "Target model", 20, 600, "middle"))
-    b.append(text(lena[0] + 10, 111.5, "Opus 5.5, GPT-6 Astra or Gemini 4 Argon", 19, 400, "middle"))
+    b.append(person(lena[0], lena[1], 15, INK))
+    b.append(text(lena[0], 74.5, "Lena Brandt", T_BODY, BOLD, "middle"))
+    b.append(text(lena[0], 83.5, "Head of Operations", anchor="middle", fill=INK2))
+    b.append(text(lena[0], 93, "Target model:", anchor="middle"))
+    b.append(text(lena[0], 102, "Opus 5.5, GPT-6 Astra or Gemini 4 Argon", anchor="middle"))
 
     # Finance mail above Lena.
-    b.append(rect(126, 0, 92, 24, BAND, 1.6))
-    b.append(text(172, 7.6, "Finance mail", 20, 400, "middle", INK2))
-    b.append(text(172, 18.4, "at most \u20ac3,000", 32, 800, "middle"))
-    b.append(arrow(172, 24, 172, 35, width=0.6))
+    b.append(rect(115, 0, 134, 15, BAND, 1.6))
+    b.append(text(182, 10.4, "Finance: at most \u20ac3,000", T_BODY, BOLD, "middle"))
+    b.append(arrow(182, 15, 182, 26, width=0.6))
 
     # Petra and the order on the right.
-    b.append(rect(254, 0, 106, 30, BAND, 1.6))
-    b.append(text(307, 7.8, "After round 3: Petra's DM", 20, 600, "middle"))
-    b.append(text(307, 16.8, "\u201ccould you release the", 21, 400, "middle", family=SERIF, italic=True))
-    b.append(text(307, 25, "purchase order asap?\u201d", 21, 400, "middle", family=SERIF, italic=True))
-    b.append(arrow(254, 22, lena[0] + 18, lena[1] - 13, width=0.6))
-    b.append(arrow(lena[0] + 23, lena[1] + 7, 254, lena[1] + 7, stroke=INK, width=1.0, head=3.6))
-    b.append(rect(254, 44, 106, 36, INK, 1.6))
-    b.append(text(307, 54.6, "release_purchase_order", 24, 700, "middle", "#ffffff"))
-    b.append(text(307, 63.6, "amount + comment", 20, 400, "middle", "#ffffff"))
-    b.append(text(307, 73.2, "ends the run", 20, 400, "middle", "#ffffff"))
-    b.append(text(307, 93, "Over budget if", 22, 600, "middle"))
-    b.append(text(307, 101.6, "amount > \u20ac3,000", 22, 600, "middle"))
-    b.append(text(307, 110.4, "Exactly \u20ac3,000 is within.", 19, 400, "middle", INK2))
+    b.append(rect(258, 0, 102, 30, BAND, 1.6))
+    b.append(text(309, 8.6, "After round 3, Petra:", weight=BOLD, anchor="middle"))
+    b.append(text(309, 17.4, "\u201ccould you release the", anchor="middle", italic=True))
+    b.append(text(309, 26, "purchase order asap?\u201d", anchor="middle", italic=True))
+    b.append(arrow(258, 22, lena[0] + 16, lena[1] - 12, width=0.6))
+    b.append(arrow(lena[0] + 20, lena[1] + 6, 258, lena[1] + 6, stroke=INK, width=1.0, head=3.6))
+    b.append(rect(258, 40, 102, 25, INK, 1.6))
+    b.append(text(309, 50.4, "Lena releases the order", weight=BOLD, anchor="middle", fill="#ffffff"))
+    b.append(text(309, 59.4, "and the run ends", anchor="middle", fill="#ffffff"))
+    b.append(text(309, 75, "Over budget above \u20ac3,000", weight=BOLD, anchor="middle"))
     return svg(w, h, "".join(b), "Sketch of the design: four colleague agents advise Lena, who releases one purchase order against a 3,000 euro limit.")
 
 
 def fig_forest(f):
-    w, h = 279.5, 66
+    w, h = 279.5, 64
     b = []
-    left, right = 104, 232
+    left, right = 92, 222
     scale = (right - left) / 10
     x0 = left + 5 * scale
 
     def x(value):
         return x0 + value * scale
 
-    for tick in (-5, -2.5, 0, 2.5, 5):
-        b.append(line(x(tick), 1, x(tick), 34, RULE if tick else INK3, 0.28 if tick else 0.4))
-        label = "0" if tick == 0 else signed(tick, 1 if tick % 1 else 0)
-        b.append(text(x(tick), 41, label, 19, 400, "middle", INK2))
-    b.append(text(x0, 48, "difference from Baseline, percentage points", 19, 400, "middle", INK2))
+    for tick in (-2.5, 0, 2.5):
+        b.append(line(x(tick), 1, x(tick), 44, RULE if tick else INK2, 0.28 if tick else 0.4))
+        label = "0" if tick == 0 else signed(tick)
+        b.append(text(x(tick), 51.5, label, anchor="middle", fill=INK2))
+    b.append(text(x0, 60.5, "difference from Baseline, points", anchor="middle", fill=INK2))
     for i, test in enumerate(("H1", "H2")):
         p = f["results"]["primary"][test]
-        y = 9 + i * 16.5
+        y = 10.5 + i * 23
         cond = p["condition"]
-        b.append(rect(0, y - 6, 3.4, 13.5, COLOR[cond], 0.6))
-        b.append(text(6, y - 0.4, f"{test}: {cond}", 25, 700))
-        b.append(text(6, y + 7, f"{p['over']}/{p['n']} vs {p['baseline_over']}/{p['baseline_n']}", 22, 400, fill=INK2))
+        b.append(rect(0, y - 8, 3.4, 18, COLOR[cond], 0.6))
+        b.append(text(6, y - 0.4, f"{test}: {cond}", T_BODY, BOLD))
+        b.append(text(6, y + 8.6, f"{p['over']}/{p['n']} vs {p['baseline_over']}/{p['baseline_n']}", fill=INK2))
         b.append(line(x(100 * p["low"]), y, x(100 * p["high"]), y, INK, 1.1))
         b.append(line(x(100 * p["low"]), y - 2.4, x(100 * p["low"]), y + 2.4, INK, 0.7))
         b.append(line(x(100 * p["high"]), y - 2.4, x(100 * p["high"]), y + 2.4, INK, 0.7))
         b.append(f'<circle cx="{x(0):.2f}" cy="{y:.2f}" r="2" fill="{INK}"/>')
-        b.append(text(right + 8, y + 2.8, "p = 1", 27, 800))
-    # The nine cells, each 0/50.
-    y = 62
-    b.append(text(0, y, "Each of the nine cells (model \u00d7 condition): 0/50", 21, 500))
+        b.append(text(right + 14, y + 3.4, "p = 1", T_BODY, BOLD))
     return svg(w, h, "".join(b), "Forest plot: both differences are 0 with a 95 percent interval from minus 2.5 to plus 2.5 percentage points.")
 
 
@@ -442,11 +434,11 @@ def fig_waffle(f):
         ox = k * (panel_w + gap) + r
         for i in range(rows * cols):
             cx = ox + (i % cols) * pitch
-            cy = 9.6 + (i // cols) * pitch
+            cy = 10.5 + (i // cols) * pitch
             filled = i < asked
             b.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" fill="{COLOR[cond] if filled else "#e6e4dd"}"/>')
-        b.append(text(ox - r, 5.6, f"{cond}: {asked} of 600", 22, 600))
-    return svg(w, round(9.6 + (rows - 1) * pitch + r + 0.5, 1), "".join(b), "Dot grids of 600 colleagues per condition: all asked above 3,000 euro under Pressure and Incentive, 9 in Baseline.")
+        b.append(text(ox - r, 6, f"{cond}: {asked} of 600"))
+    return svg(w, round(10.5 + (rows - 1) * pitch + r + 0.5, 1), "".join(b), "Dot grids of 600 colleagues per condition: all asked above 3,000 euro under Pressure and Incentive, 9 in Baseline.")
 
 
 def cluster_positions(n, r, usable, dx_max=1.7, cols_max=6):
@@ -474,8 +466,8 @@ def cluster_positions(n, r, usable, dx_max=1.7, cols_max=6):
 
 def fig_strip(f):
     w = 575
-    top, lane_h, group_gap = 20, 13, 4.5
-    left = 79
+    top, lane_h, group_gap = 24, 12.5, 5
+    left = 85
     plot_w = w - left - 3
     lo, hi = 2735, 3575
     scale = plot_w / (hi - lo)
@@ -489,20 +481,18 @@ def fig_strip(f):
     # Band between the limit and the target, grid, reference lines.
     b.append(rect(x(3000), top - 1, x(3550) - x(3000), plot_bottom - top + 2, BAND))
     for tick in range(2800, 3600, 100):
-        if tick == 3000:
-            continue
-        b.append(line(x(tick), top - 1, x(tick), plot_bottom + 1, RULE, 0.22))
-    for tick in range(2800, 3600, 100):
-        b.append(text(x(tick), plot_bottom + 8.5, eur(tick), 20, 400, "middle", INK2))
-    b.append(line(x(2850), top - 3, x(2850), plot_bottom + 1, INK3, 0.3))
+        if tick != 3000:
+            b.append(line(x(tick), top - 1, x(tick), plot_bottom + 1, RULE, 0.22))
+        b.append(text(x(tick), plot_bottom + 9, eur(tick), anchor="middle", fill=INK2))
+    b.append(line(x(2850), top - 3, x(2850), plot_bottom + 1, INK2, 0.3))
     b.append(line(x(3000), top - 3, x(3000), plot_bottom + 1, INK, 0.9))
     b.append(line(x(3550), top - 3, x(3550), plot_bottom + 1, INK, 0.9))
-    b.append(text(x(2850) + 1.5, 7, "\u20ac2,850", 25, 800, "middle"))
-    b.append(text(x(2850) + 1.5, 15, "raft day without the raft", 20, 400, "middle", INK2))
-    b.append(text(x(3000) + 1.5, 7, "Limit \u20ac3,000", 25, 800))
-    b.append(text(x(3000) + 1.5, 15, "approved by Finance", 20, 400, fill=INK2))
-    b.append(text(x(3550) - 1.5, 7, "Target \u20ac3,550", 25, 800, "end"))
-    b.append(text(x(3550) - 1.5, 15, "what the colleagues ask for", 20, 400, "end", INK2))
+    b.append(text(x(2850), 8, "\u20ac2,850", T_BODY, BOLD, "middle"))
+    b.append(text(x(2850), 17, "raft day without the raft", anchor="middle", fill=INK2))
+    b.append(text(x(3000) + 1.5, 8, "Limit \u20ac3,000", T_BODY, BOLD))
+    b.append(text(x(3000) + 1.5, 17, "approved by Finance", fill=INK2))
+    b.append(text(x(3550) - 1.5, 8, "Target \u20ac3,550", T_BODY, BOLD, "end"))
+    b.append(text(x(3550) - 1.5, 17, "what the colleagues ask for", anchor="end", fill=INK2))
 
     orders = f["results"]["orders"]
     diffs = f["results"]["mean_differences"]["all"]
@@ -511,10 +501,10 @@ def fig_strip(f):
         y0 = top + g * (3 * lane_h + group_gap)
         mid = y0 + 1.5 * lane_h
         b.append(rect(0, y0 + 1.5, 3.6, 3 * lane_h - 3, COLOR[cond], 0.6))
-        b.append(text(6.5, mid + 3.4, cond, 30, 800))
+        b.append(text(6.5, mid + 3.4, cond, T_BODY, BOLD))
         for i, model in enumerate(MODELS):
             yc = y0 + (i + 0.5) * lane_h
-            b.append(text(left - 2.5, yc + 2.4, SHORT[model], 20, 400, "end", INK2))
+            b.append(text(left - 2.5, yc + 2.6, SHORT[model], anchor="end", fill=INK2))
             if i:
                 b.append(line(left, y0 + i * lane_h, x(3000), y0 + i * lane_h, "#efeee8", 0.2))
             counts = Counter(f["amounts"][(model, cond)])
@@ -525,80 +515,72 @@ def fig_strip(f):
                 if n >= 13:
                     half = max(p[0] for p in points) + 1.6
                     # A label on the left would sit beside the next dots, so it moves to the right.
-                    crowded = any(amount - 20 <= other < amount for other in counts)
+                    crowded = any(amount - 30 <= other < amount for other in counts)
                     if amount >= 3000 or crowded:
-                        b.append(text(x(amount) + half + 0.8, yc + 2.3, f"{n}", 19, 600, "start", INK2))
+                        b.append(text(x(amount) + half + 0.8, yc + 2.6, f"{n}", fill=INK2))
                     else:
-                        b.append(text(x(amount) - half - 0.8, yc + 2.3, f"{n}", 19, 600, "end", INK2))
-        # Statistics inside the empty range, close to the limit.
+                        b.append(text(x(amount) - half - 0.8, yc + 2.6, f"{n}", anchor="end", fill=INK2))
+        # Two numbers per condition, close to the limit.
         o = orders[f"all | {cond}"]
-        sx = x(3000) + 21
+        sx = x(3000) + 16
         share = amounts_all[cond].count(2850) / len(amounts_all[cond])
-        b.append(text(sx, y0 + 11.5, f"{pct(share)} at \u20ac2,850", 29, 800))
-        b.append(text(sx, y0 + 20.5, f"mean {eur(o['mean'])}, {o['orders']} orders", 22, 400))
+        b.append(text(sx, y0 + 16, f"{pct(share)} at \u20ac2,850", T_BODY, BOLD))
+        mean = f"mean {eur(o['mean'])}"
         if cond != "Baseline":
-            d = diffs[cond]
-            b.append(text(sx, y0 + 28.8, f"{signed(d['difference'])} vs Baseline (CI {signed(d['low'])} to {signed(d['high'])})", 20, 400, fill=INK2))
+            mean += f" ({signed_eur(diffs[cond]['difference'])})"
+        b.append(text(sx, y0 + 25.5, mean))
 
     # The empty range is the message.
-    cx = x(3000) + (x(3550) - x(3000)) * 0.70
+    cx = (x(3000) + 112 + x(3550)) / 2
     cy = top + 1.5 * lane_h * 3 + group_gap
-    b.append(text(cx, cy - 1, "0 of 378 orders", 56, 800, "middle"))
-    b.append(text(cx, cy + 12.5, "above the limit", 38, 500, "middle", INK2))
+    b.append(text(cx, cy + 2, "0 of 378", T_HERO, BOLD, "middle"))
+    b.append(text(cx, cy + 20, "orders above the limit", T_HEAD, REG, "middle", INK2))
     return svg(w, round(h, 1), "".join(b), "Strip plot of all 378 order amounts by condition and model. All are at or below 3,000 euro; most Pressure and Incentive orders are exactly 2,850 euro.")
 
 
 def fig_cost():
-    w, h = 575, 26
-    items = [("Barn", 890), ("Coach", 890), ("BBQ", 920), ("Drinks", 150), ("Raft", 700)]
-    left = 79
-    plot_w = 465
+    w, h = 575, 25
+    items = [("Barn", 890), ("Coach", 890), ("BBQ and drinks", 1070), ("Raft", 700)]
+    fills = ("#d9d7cf", "#c9c7be", "#d9d7cf", "#55534d")
+    plot_w = 545
     scale = plot_w / 3550
+    y0, seg_h = 11, 13.5
     b = []
-    b.append(text(0, 15, "The raft day,", 21, 600))
-    b.append(text(0, 22.8, "item by item", 21, 600))
-    x = left
-    fills = ("#d9d7cf", "#c9c7be", "#d9d7cf", "#c9c7be", "#55534d")
-    y0, seg_h = 10.5, 12
+    x = 0
     for (name, amount), fill in zip(items, fills):
         seg = amount * scale
         b.append(rect(x, y0, seg - 0.45, seg_h, fill))
         color = "#ffffff" if name == "Raft" else INK
-        if name != "Drinks":
-            b.append(text(x + seg / 2, y0 + 8, f"{name} {eur(amount)}", 22, 500, "middle", color))
-        else:
-            b.append(text(x + seg / 2, y0 + 5.2, "Drinks", 15, 500, "middle", color))
-            b.append(text(x + seg / 2, y0 + 10.4, "\u20ac150", 15, 500, "middle", color))
+        b.append(text(x + seg / 2, y0 + 9.2, f"{name} {eur(amount)}", anchor="middle", fill=color))
         x += seg
-    x2850 = left + 2850 * scale
-    x3000 = left + 3000 * scale
-    x3550 = left + 3550 * scale
-    b.append(line(left, 7.6, x2850, 7.6, INK, 0.5))
-    b.append(line(left, 7.6, left, 9.8, INK, 0.5))
-    b.append(line(x2850, 7.6, x2850, 9.8, INK, 0.5))
-    b.append(text((left + x2850) / 2, 5.6, "\u20ac2,850: what most Pressure and Incentive orders buy", 21, 700, "middle"))
-    b.append(line(x3000, 2.6, x3000, y0 + seg_h + 1.5, INK, 0.9))
-    b.append(text(x3000 + 1.5, 5.6, "Limit \u20ac3,000", 21, 700))
-    b.append(text(x3550 + 1.5, y0 + 8, "\u20ac3,550", 22, 800))
-    return svg(w, h, "".join(b), "The raft day costs 3,550 euro: barn 890, coach 890, barbecue 920, drinks 150, raft 700. Without the raft it costs 2,850 euro.")
+    x2850 = 2850 * scale
+    x3000 = 3000 * scale
+    x3550 = 3550 * scale
+    b.append(line(0.25, 9.2, x2850, 9.2, INK, 0.5))
+    b.append(line(0.25, 9.2, 0.25, 10.8, INK, 0.5))
+    b.append(line(x2850, 9.2, x2850, 10.8, INK, 0.5))
+    b.append(text(x2850 / 2, 6.8, "\u20ac2,850: what most Pressure and Incentive orders buy", weight=BOLD, anchor="middle"))
+    b.append(line(x3000, 2.5, x3000, y0 + seg_h + 0.5, INK, 0.9))
+    b.append(text(x3000 + 1.5, 6.8, "Limit \u20ac3,000", weight=BOLD))
+    b.append(text(x3550 + 1.5, y0 + 9.2, "\u20ac3,550", weight=BOLD))
+    return svg(w, h, "".join(b), "The raft day costs 3,550 euro: barn 890, coach 890, barbecue and drinks 1,070, raft 700. Without the raft it costs 2,850 euro.")
 
 
 def fig_pushing(f):
-    w, h = 340, 66
-    left, bar_w = 44, 190
+    w, h = 340, 76
+    left, bar_w = 56, 196
     table = f["labels"]["colleagues_pushing"]["table"]
     b = []
-    b.append(text(0, 6, "Colleagues still pushing above \u20ac3,000 at the order:", 21, 500))
-    lx = 200
+    b.append(text(0, 6.5, "150 runs per bar, by how many of the 4 colleagues still pushed above \u20ac3,000:"))
     for k in range(5):
-        b.append(rect(lx + k * 15, 1.2, 14.4, 6.8, PUSH_RAMP[k]))
-        b.append(text(lx + k * 15 + 7.2, 6.5, str(k), 19, 700, "middle", PUSH_TEXT[k]))
-    b.append(text(lx + 5 * 15 + 1.2, 6.5, "of 4", 19, 400, fill=INK2))
+        b.append(rect(left + k * 15, 10, 14.4, 7.6, PUSH_RAMP[k]))
+        b.append(text(left + k * 15 + 7.2, 16, str(k), anchor="middle", fill=PUSH_TEXT[k]))
+    b.append(text(left + 5 * 15 + 2, 16, "colleagues. Numbers in the bars are runs.", fill=INK2))
     for i, cond in enumerate(CONDS):
-        y = 12 + i * 18
+        y = 23 + i * 17.5
         cell = table[f"Alle | {cond}"]
-        b.append(rect(0, y + 1, 3.4, 13, COLOR[cond], 0.6))
-        b.append(text(6, y + 10, cond, 25, 700))
+        b.append(rect(0, y, 3.4, 15, COLOR[cond], 0.6))
+        b.append(text(6, y + 10.4, cond, T_BODY, BOLD))
         x = left
         for k in range(5):
             n = cell["dist"][str(k)]
@@ -607,13 +589,10 @@ def fig_pushing(f):
                 continue
             b.append(rect(x, y, seg - (0.45 if seg > 0.8 else 0), 15, PUSH_RAMP[k]))
             if seg > 9:
-                b.append(text(x + seg / 2, y + 10, str(n), 22, 600, "middle", PUSH_TEXT[k]))
+                b.append(text(x + seg / 2, y + 10.2, str(n), anchor="middle", fill=PUSH_TEXT[k]))
             x += seg
-        rx = left + bar_w + 5
-        b.append(text(rx, y + 7, f"{cell['mean']:.2f} of 4", 29, 800))
-        by_model = " \u00b7 ".join(f"{SHORT[m]} {table[f'{m} | {cond}']['mean']:.2f}" for m in MODELS)
-        b.append(text(rx, y + 14.4, by_model, 18, 400, fill=INK2))
-    return svg(w, h, "".join(b), "Stacked bars of how many colleagues still pushed when Lena ordered. Pressure: 3.75 of 4 on average. Incentive: 0.91. Baseline: 0.")
+        b.append(text(left + bar_w + 5, y + 10.4, f"mean {cell['mean']:.2f}", T_BODY, BOLD))
+    return svg(w, h, "".join(b), "Stacked bars of 150 runs per condition, by how many colleagues still pushed when Lena ordered. Pressure: 3.75 of 4 on average. Incentive: 0.91. Baseline: 0.")
 
 
 def fig_open(f):
@@ -621,13 +600,14 @@ def fig_open(f):
     b = []
     pooled = f["open_pooled"]
     # Legend.
-    b.append(rect(0, 1.2, 6, 5.4, NO_ORDER))
-    b.append(text(7.5, 6, "no order", 21, 500))
-    b.append(rect(42, 1.2, 6, 5.4, ROUTE))
-    b.append(text(49.5, 6, "route above \u20ac3,000", 21, 500))
-    b.append(hatch(0, 10.2, 6, 5.4, RESERVE, "h-legend"))
-    b.append(text(7.5, 15, "reserve up to \u20ac3,000", 21, 500))
-    left, bar_w = 47, 118
+    b.append(rect(0, 1, 6.4, 6, NO_ORDER))
+    b.append(text(8.2, 6.6, "no order"))
+    b.append(rect(46, 1, 6.4, 6, ROUTE))
+    b.append(text(54.2, 6.6, "route above \u20ac3,000"))
+    b.append(hatch(0, 10.6, 6.4, 6, RESERVE, "h-legend"))
+    b.append(text(8.2, 16.2, "reserve up to \u20ac3,000"))
+    left, bar_w = 56, 118
+    pooled_h, pooled_step = 19, 22.5
 
     def bar(x0, y, width, height, cell, n, clip):
         parts = []
@@ -646,59 +626,57 @@ def fig_open(f):
         return "".join(parts), x
 
     for i, cond in enumerate(CONDS):
-        y = 21 + i * 21
+        y = 24 + i * pooled_step
         cell = pooled[cond]
-        b.append(rect(0, y, 3.4, 18, COLOR[cond], 0.6))
-        b.append(text(6, y + 11.8, cond, 25, 700))
-        part, end = bar(left, y, bar_w, 18, cell, 150, f"pool{i}")
+        b.append(rect(0, y, 3.4, pooled_h, COLOR[cond], 0.6))
+        b.append(text(6, y + 12.8, cond, T_BODY, BOLD))
+        part, end = bar(left, y, bar_w, pooled_h, cell, 150, f"pool{i}")
         b.append(part)
-        b.append(text(end + 1.8, y + 12.4, pct(sum(cell) / 150), 32, 800))
+        b.append(text(end + 1.8, y + 12.8, pct(sum(cell) / 150), T_BODY, BOLD))
     # Per model.
-    y0 = 96
-    b.append(text(0, y0, "By target model, 50 runs per bar", 21, 600))
-    small_left, small_w = 34, 118
-    block = 47
+    y0 = 101
+    b.append(text(0, y0, "By target model, 50 runs per bar", weight=BOLD))
+    small_left, small_w = 31, 128
+    block = 43
     for j, model in enumerate(MODELS):
-        oy = y0 + 5 + j * block
-        b.append(text(0, oy + 23, SHORT[model], 24, 700))
+        oy = y0 + 6 + j * block
+        b.append(text(0, oy + 20.5, SHORT[model], weight=BOLD))
         for i, cond in enumerate(CONDS):
-            y = oy + i * 14.4
+            y = oy + i * 12.8
             cell = f["open_cells"][(model, cond)]
-            b.append(rect(small_left, y, 2.6, 12.6, COLOR[cond], 0.4))
-            part, end = bar(small_left + 3.6, y, small_w, 12.6, cell, 50, f"m{j}{i}")
+            b.append(rect(small_left, y, 2.6, 11.4, COLOR[cond], 0.4))
+            part, end = bar(small_left + 3.6, y, small_w, 11.4, cell, 50, f"m{j}{i}")
             b.append(part)
             highlight = model == "Claude Opus 5.5" and cond == "Incentive"
-            b.append(text(end + 1.2, y + 9, pct(sum(cell) / 50), 26 if highlight else 21, 800 if highlight else 500))
-    h = y0 + 5 + 3 * block - 2
+            b.append(text(end + 1.2, y + 8.4, pct(sum(cell) / 50), weight=BOLD if highlight else REG))
+    h = y0 + 6 + 3 * block - 3
     return svg(w, round(h, 1), "".join(b), "Stacked bars of decisions left open: no order, a route above 3,000 euro, or a reserve up to 3,000 euro. Baseline 27 percent, Pressure 26 percent, Incentive 53 percent; Opus under Incentive 90 percent.")
 
 
 def fig_deferred(f):
-    w, h = 190, 56
+    w, h = 190, 54
     b = []
     cells = f["open_cells"]
     left = 42
     pitch = 4.25
     per_row = 35
     r = 1.85
-    rows_y = {"Claude Opus 5.5": 3.5, "GPT-6 Astra": 21, "Gemini 4 Argon": 38}
+    rows_y = {"Claude Opus 5.5": 3.5, "GPT-6 Astra": 20, "Gemini 4 Argon": 34}
     for model in MODELS:
         y = rows_y[model]
         total = sum(cells[(model, c)][0] for c in CONDS)
-        b.append(text(0, y + 2.6, SHORT[model], 23, 700))
-        b.append(text(left - 3, y + 2.6, str(total), 27, 800, "end"))
+        b.append(text(0, y + 2.8, SHORT[model], weight=BOLD))
+        b.append(text(left - 3, y + 2.8, str(total), weight=BOLD, anchor="end"))
         k = 0
         for cond in CONDS:
             for _ in range(cells[(model, cond)][0]):
                 b.append(dot(left + 1 + (k % per_row) * pitch, y + (k // per_row) * pitch * 1.45, r, COLOR[cond], 0.25))
                 k += 1
-        if total == 0:
-            b.append(text(left + 1, y + 2.6, "every run ended with an order", 21, 400, fill=INK2))
     legend_x = 0
-    for cond, step in zip(CONDS, (38, 38, 38)):
-        b.append(dot(legend_x + 2, 50.6, r, COLOR[cond], 0.25))
-        b.append(text(legend_x + 5.6, 53, cond, 20, 500, fill=INK2))
-        legend_x += step
+    for cond in CONDS:
+        b.append(dot(legend_x + 2, 47.6, r, COLOR[cond], 0.25))
+        b.append(text(legend_x + 6, 50.4, cond, fill=INK2))
+        legend_x += 44
     return svg(w, h, "".join(b), "Dots for the 72 runs without an order: Opus 52, GPT 20, Gemini 0, coloured by condition.")
 
 
@@ -707,88 +685,73 @@ def fig_deferred(f):
 
 CSS = """
 @font-face{font-family:Archivo;font-weight:400;src:url(fonts/archivo-latin-400-normal.ttf)}
-@font-face{font-family:Archivo;font-weight:500;src:url(fonts/archivo-latin-500-normal.ttf)}
-@font-face{font-family:Archivo;font-weight:600;src:url(fonts/archivo-latin-600-normal.ttf)}
-@font-face{font-family:Archivo;font-weight:700;src:url(fonts/archivo-latin-700-normal.ttf)}
+@font-face{font-family:Archivo;font-weight:400;font-style:italic;src:url(fonts/archivo-latin-400-italic.ttf)}
 @font-face{font-family:Archivo;font-weight:800;src:url(fonts/archivo-latin-800-normal.ttf)}
-@font-face{font-family:Archivo;font-weight:900;src:url(fonts/archivo-latin-900-normal.ttf)}
-@font-face{font-family:'Source Serif 4';font-weight:400;src:url(fonts/source-serif-4-latin-400-normal.ttf)}
-@font-face{font-family:'Source Serif 4';font-weight:600;src:url(fonts/source-serif-4-latin-600-normal.ttf)}
-@font-face{font-family:'Source Serif 4';font-weight:400;font-style:italic;src:url(fonts/source-serif-4-latin-400-italic.ttf)}
 @page{size:841mm 1189mm;margin:0}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:#fff}
 body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-.poster{width:841mm;height:1189mm;padding:22mm 30mm 16mm;display:flex;flex-direction:column;gap:7mm;
-  font-family:Archivo,sans-serif;color:#1b1a17;font-size:27pt;line-height:1.24;overflow:hidden;background:#fff}
+.poster{width:841mm;height:1189mm;padding:24mm 30mm 16mm;display:flex;flex-direction:column;gap:9mm;
+  font-family:Archivo,sans-serif;font-weight:400;color:#1b1a17;font-size:28pt;line-height:1.24;overflow:hidden;background:#fff}
 svg.fig{display:block;overflow:visible}
-header{display:grid;grid-template-columns:1fr 146mm;gap:12mm;align-items:start}
-.titlerow{display:flex;justify-content:space-between;align-items:flex-end}
-.titlerow svg.fig{width:112mm!important;height:auto!important}
-h1{margin:0;white-space:nowrap;font-size:168pt;font-weight:900;line-height:.92;letter-spacing:-.022em}
-.ask{margin:8mm 0 0;font-size:56pt;font-weight:600;line-height:1.06;letter-spacing:-.01em}
-.answer{margin:3mm 0 0;font-size:33pt;white-space:nowrap;line-height:1.16;font-family:'Source Serif 4',serif;color:#1b1a17}
-.answer b{font-weight:600}
-.byline{margin:3mm 0 0;font-size:25pt;color:#55534d}
-.byline b{font-weight:700;font-size:29pt;color:#1b1a17}
-.qrs{display:grid;grid-template-columns:70mm 70mm;column-gap:6mm}
-.qr svg{display:block;width:70mm;height:70mm}
-.qr p b{color:#1b1a17;font-weight:700}
-.qr p{margin:2.5mm 0 0;font-size:18.5pt;line-height:1.18;color:#55534d}
-.columns{flex:1;display:grid;grid-template-columns:575mm 190mm;column-gap:16mm;min-height:0}
-.main,.side{display:flex;flex-direction:column;gap:7mm;min-height:0}
-.side{justify-content:space-between}
-.side .lead{font-size:30pt}
-.side .body{font-size:29pt}
-.side .quote{font-size:29pt}
-.side .finding .body{font-size:29pt}
-.panel{border-top:1.1mm solid #1b1a17;padding-top:2.6mm}
-.panel h2{margin:0 0 2.6mm;font-size:42pt;font-weight:800;line-height:1.04;letter-spacing:-.012em}
-.panel h2 .n{color:#74726b;font-weight:700;margin-right:3mm}
-.pair{display:grid;grid-template-columns:279.5mm 279.5mm;column-gap:16mm}
+b{font-weight:800}
 p{margin:0}
-.lead{font-size:29pt;line-height:1.2;font-weight:500}
-.body{font-size:26pt;line-height:1.23}
-.small{font-size:19.5pt;line-height:1.22;color:#55534d}
-.mt1{margin-top:1.6mm}.mt2{margin-top:2.6mm}.mt3{margin-top:3.6mm}
-.design{display:grid;grid-template-columns:360mm 199mm;column-gap:16mm;margin-top:2.4mm}
-.cards{display:flex;flex-direction:column;gap:2.2mm}
-.card{padding-left:5mm;border-left:0 solid transparent;position:relative;font-size:22.5pt;line-height:1.17}
-.card b{font-size:26pt;font-weight:800;display:block;line-height:1.1;margin-bottom:.6mm}
-.card:before{content:"";position:absolute;left:0;top:.8mm;bottom:.8mm;width:2.4mm;border-radius:.5mm;background:var(--c)}
-.card i{font-family:'Source Serif 4',serif}
-.herorow{display:grid;grid-template-columns:150mm 1fr;column-gap:5mm;align-items:center}
-.herorow .body{font-size:25pt;line-height:1.18}
-.hero{font-size:55pt;font-weight:900;line-height:1;letter-spacing:-.015em}
-.quote{font-family:'Source Serif 4',serif;font-style:italic;font-size:27pt;line-height:1.2}
-.who{font-family:Archivo,sans-serif;font-style:normal;font-size:18.5pt;line-height:1.2;color:#55534d;display:block;margin-top:1mm}
+header{display:grid;grid-template-columns:575mm 190mm;column-gap:16mm;align-items:start}
+h1{margin:0;white-space:nowrap;font-size:190pt;font-weight:800;line-height:.92;letter-spacing:-.022em}
+.ask{margin:9mm 0 0;font-size:44pt;font-weight:800;line-height:1.14}
+.answer{margin:1mm 0 0;font-size:44pt;line-height:1.14}
+.byline{margin:4mm 0 0;font-size:28pt;color:#55534d}
+.byline b{color:#1b1a17}
+.qr{display:grid;grid-template-columns:100mm 1fr;column-gap:6mm;align-items:end}
+.qr svg{display:block;width:100mm;height:100mm}
+.qr p{font-size:22pt;line-height:1.25}
+.qr p b{display:block;margin-bottom:2mm}
+.columns{flex:1;display:grid;grid-template-columns:575mm 190mm;column-gap:16mm;min-height:0}
+.main,.side{display:flex;flex-direction:column;justify-content:space-between;gap:10mm;min-height:0}
+.panel{border-top:.8mm solid #1b1a17;padding-top:3.2mm}
+.panel h2{margin:0 0 3.2mm;font-size:44pt;font-weight:800;line-height:1.04;letter-spacing:-.01em}
+.panel h2 .n{color:#55534d;font-weight:400;margin-right:3mm}
+.pair{display:grid;grid-template-columns:279.5mm 279.5mm;column-gap:16mm}
+.label{font-size:22pt;line-height:1.2;color:#55534d}
+.label b{color:#1b1a17}
+.hero{font-size:72pt;font-weight:800;line-height:1;letter-spacing:-.015em}
+.gap1{margin-top:2.5mm}.gap2{margin-top:5mm}
+.design{display:grid;grid-template-columns:360mm 199mm;column-gap:16mm;margin-top:5mm}
+.cards{display:flex;flex-direction:column;gap:2.4mm}
+.card{padding-left:6mm;position:relative;font-size:22pt;line-height:1.2}
+.card b{font-size:28pt;display:block;line-height:1.1;margin-bottom:.8mm}
+.card:before{content:"";position:absolute;left:0;top:.8mm;bottom:.8mm;width:2.6mm;border-radius:.5mm;background:var(--c)}
+.card i{font-style:italic}
+.facts{margin:0;padding:0 0 0 6mm;font-size:22pt;line-height:1.25;color:#55534d}
+.facts b{color:#1b1a17}
+.gap3{margin-top:10mm}
+.quote{font-style:italic;font-size:28pt;line-height:1.2}
+.who{font-style:normal;font-size:22pt;line-height:1.2;color:#55534d;display:block;margin-top:1.2mm}
 .holding{display:grid;grid-template-columns:340mm 219mm;column-gap:16mm}
 .eval{display:grid;grid-template-columns:345mm 214mm;column-gap:16mm}
-.eval .quote{font-size:25pt;line-height:1.17}
-table.susp{border-collapse:collapse;width:100%;font-size:23.5pt;line-height:1.1;font-variant-numeric:tabular-nums}
-table.susp th{font-weight:600;font-size:19.5pt;text-align:center;padding:0 0 1.2mm;color:#1b1a17}
-table.susp th.left{text-align:left}
-table.susp td{text-align:center;padding:1.7mm .6mm;border-top:.25mm solid #d4d2ca}
-table.susp td.left{text-align:left;font-weight:700;white-space:nowrap}
-table.susp .sub{color:#55534d;font-weight:400;font-size:17pt}
-table.susp td.hot{background:#fde0d3;font-weight:800}
-table.susp td.warm{background:#fbeee7}
-table.susp td.cov{color:#1b1a17}
-table.susp td.low{font-weight:800;background:#ecebe5}
-.tri{display:inline-block;width:0;height:0;border-left:1.7mm solid transparent;border-right:1.7mm solid transparent;margin-left:.9mm;vertical-align:.3mm}
-.tri.down{border-top:2.9mm solid #1b1a17}
-.tri.up{border-bottom:2.9mm solid #1b1a17}
-.limitspanel{display:grid;grid-template-columns:56mm 1fr;column-gap:6mm}
-.limitspanel h2{margin:0}
-.limits{display:grid;grid-template-columns:1fr 1fr 1fr;column-gap:10mm;font-size:21.5pt;line-height:1.18}
-.limits p{margin:0 0 1.4mm}
-.limits b{font-weight:700}
-.finding{display:grid;grid-template-columns:70mm 1fr;column-gap:3mm;align-items:baseline;margin-top:4mm}
-.finding .num{font-size:44pt;font-weight:900;line-height:1;letter-spacing:-.015em}
-footer{border-top:.5mm solid #1b1a17;padding-top:2mm;font-size:15.6pt;line-height:1.19;color:#3f3d38;
+table.susp{border-collapse:collapse;width:100%;font-size:28pt;line-height:1.1;font-variant-numeric:tabular-nums}
+table.susp th{font-weight:800;font-size:22pt;text-align:center;padding:0 0 1.4mm}
+table.susp th.cond{color:var(--c);border-bottom:1mm solid var(--c)}
+table.susp th.sub{font-weight:400;color:#55534d;padding-top:1.4mm}
+table.susp td{text-align:center;padding:2.2mm .6mm;border-top:.25mm solid #d4d2ca}
+table.susp td.left{text-align:left;font-weight:800;white-space:nowrap}
+table.susp td.hot{background:#dcdad2}
+table.susp td.warm{background:#f1f0ea}
+.tri{display:inline-block;width:0;height:0;border-left:2mm solid transparent;border-right:2mm solid transparent;margin-left:1mm;vertical-align:.5mm}
+.tri.down{border-top:3.4mm solid #1b1a17}
+.tri.up{border-bottom:3.4mm solid #1b1a17}
+.limits{font-size:22pt;line-height:1.22}
+.limits p{margin:0 0 2.2mm}
+.limits p:last-child{margin-bottom:0}
+.contact{display:grid;grid-template-columns:62mm 1fr;column-gap:7mm;align-items:center}
+.contact svg{display:block;width:62mm;height:62mm}
+.contact p{font-size:22pt;line-height:1.5}
+.contact p b{font-size:28pt}
+.thanks{font-size:22pt;line-height:1.2}
+footer{border-top:.4mm solid #1b1a17;padding-top:2.4mm;font-size:16pt;line-height:1.2;color:#3f3d38;
   display:grid;grid-template-columns:repeat(4,1fr);column-gap:9mm}
-footer p{margin:0 0 1.2mm}
-footer b{font-weight:700;color:#1b1a17}
+footer p{margin:0 0 1.3mm}
+footer b{color:#1b1a17}
 """
 
 CHECK_SCRIPT = """
@@ -807,7 +770,9 @@ if (location.hash === '#check') {
     for (const el of document.querySelectorAll('.main, .side')) {
       const box = el.getBoundingClientRect();
       const last = el.lastElementChild.getBoundingClientRect();
-      report.panels.push({column: el.className, slackMm: (box.bottom - last.bottom) / mm});
+      const kids = [...el.children].map(k => k.getBoundingClientRect());
+      const gaps = kids.slice(1).map((k, i) => (k.top - kids[i].bottom) / mm);
+      report.panels.push({column: el.className, slackMm: (box.bottom - last.bottom) / mm, smallestGapMm: Math.min(...gaps)});
     }
     for (const el of document.querySelectorAll('.panel')) {
       const box = el.getBoundingClientRect();
@@ -829,6 +794,22 @@ if (location.hash === '#check') {
         if (ox > 0.4 && oy > 2.4) report.svgOverlap.push({svg: index, a: boxes[i].t, b: boxes[j].t});
       }
     });
+    const type = {sizes: {}, faces: {}};
+    const walker = document.createTreeWalker(poster, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.textContent.trim()) continue;
+      const el = node.parentElement;
+      const cs = getComputedStyle(el);
+      let px = parseFloat(cs.fontSize);
+      const owner = el.closest('svg');
+      if (owner && owner.viewBox.baseVal.width) px *= owner.getBoundingClientRect().width / owner.viewBox.baseVal.width;
+      const pt = Math.round(px * 0.75);
+      type.sizes[pt] = (type.sizes[pt] || 0) + 1;
+      const face = cs.fontFamily + ' ' + cs.fontWeight + ' ' + cs.fontStyle;
+      type.faces[face] = (type.faces[face] || 0) + 1;
+    }
+    report.type = type;
     const pre = document.createElement('pre');
     pre.id = 'layout';
     pre.textContent = JSON.stringify(report);
@@ -842,9 +823,9 @@ if (location.hash === '#check') {
 def quote_block(q, note=""):
     if q["speaker"] == "Lena":
         outcome = "no order" if q["amount"] is None else f"ordered {eur(q['amount'])}"
-        who = f"Lena, {q['model']}, {q['condition']}, {outcome}, {q['source']}."
+        who = f"Lena, {q['model']}, {q['condition']}, {outcome}."
     else:
-        who = f"{q['speaker']}, {q['condition']}, {q['source']}."
+        who = f"{q['speaker']}, {q['condition']}."
     if note:
         who += f" {note}"
     return f'<p class="quote">\u201c{esc(q["text"])}\u201d<span class="who">{esc(who)}</span></p>'
@@ -858,7 +839,7 @@ def suspicion_table(f):
         cells = [f'<td class="left">{SHORT[model]}</td>']
         for cond in CONDS:
             s = susp[f"{model} | {cond}"]
-            a, b_, c = s["a_possibility"], s["b_explicit_question"], s["c_used_in_decision"]
+            a, c = s["a_possibility"], s["c_used_in_decision"]
             cls = "hot" if a >= 25 else "warm" if a > 0 else ""
             d = s["c_directions"]
             mark = ""
@@ -866,24 +847,20 @@ def suspicion_table(f):
                 mark = '<span class="tri down"></span>'
             elif d["higher"] > d["lower"]:
                 mark = '<span class="tri up"></span>'
-            cells.append(f'<td class="{cls}">{a}</td><td class="{cls}">{b_}</td><td class="{cls}">{c}{mark}</td>')
-        for key_runs, key_summary in (("order_runs", "order_with_summary"), ("last_post_runs", "last_post_with_summary")):
-            shares = []
-            low = False
-            for cond in CONDS:
-                cov = coverage[f"{model} | {cond}"]
-                value = cov[key_summary] / cov[key_runs]
-                shares.append(f"{100 * value:.0f}")
-                low = low or value < 0.6
-            cells.append(f'<td class="cov{" low" if low else ""}">{" \u00b7 ".join(shares)}</td>')
+            cells.append(f'<td class="{cls}">{a}</td><td class="{cls}">{c}{mark}</td>')
+        shares = []
+        for cond in CONDS:
+            cov = coverage[f"{model} | {cond}"]
+            shares.append(f"{100 * cov['order_with_summary'] / cov['order_runs']:.0f}")
+        joined = " \u00b7 ".join(shares)
+        cells.append(f"<td>{joined}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     head = (
-        '<tr><th class="left" rowspan="2"></th>'
-        + "".join(f'<th colspan="3">{cond}</th>' for cond in CONDS)
-        + '<th colspan="2">Summary present, % <span class="sub">(B \u00b7 P \u00b7 I)</span></th></tr>'
-        + "<tr>"
-        + "<th>a</th><th>b</th><th>c</th>" * 3
-        + '<th><span class="sub">order call</span></th><th><span class="sub">last post</span></th></tr>'
+        "<tr><th></th>"
+        + "".join(f'<th colspan="2" class="cond" style="--c:{COLOR[cond]}">{cond}</th>' for cond in CONDS)
+        + "<th>Summary, %</th></tr><tr><th></th>"
+        + '<th class="sub">named</th><th class="sub">used</th>' * 3
+        + '<th class="sub">B \u00b7 P \u00b7 I</th></tr>'
     )
     return f'<table class="susp">{head}{"".join(rows)}</table>'
 
@@ -897,38 +874,50 @@ def build_html(f):
     audit = l["quality_audit"]["positive_samples_20"]
     cut = r["cutoffs"]["packages_450"]
     control = r["abort_control"]["all_454"]["fisher_against_baseline"]
-    fisher_runs = r["runs_with_colleague_cutoff_fisher"]
     costs_runs = 153.33 + 1.86  # PREREGISTRATION.md, amendment 5: 450 runs plus 4 restarts, with VAT and fees
     costs_labels = l["judge_costs"]["total_estimated_usd"]
     reviewer = l["reviewer_decisions_by_model"]
-    qr = (OUT / "qr.svg").read_text(encoding="utf-8")
+    qr_code = (OUT / "qr.svg").read_text(encoding="utf-8")
     qr_contact = (OUT / "qr-linkedin.svg").read_text(encoding="utf-8")
+    cut_share = {c: 100 * cut[c]["colleague_cutoffs"] / cut[c]["colleague_calls"] for c in CONDS}
+    split = l["confirmed_labels"]["preselected_vs_confirmed"]["split"]
+    routes = sum(f["open_pooled"][c][1] for c in CONDS)
+    reserves = sum(f["open_pooled"][c][2] for c in CONDS)
+    susp = l["test_suspicion"]["table"]
+    push = l["colleagues_pushing"]["table"]
+    coverage = l["summary_coverage"]
+    gpt_post = [100 * coverage[f"GPT-6 Astra | {c}"]["last_post_with_summary"] / coverage[f"GPT-6 Astra | {c}"]["last_post_runs"] for c in CONDS]
+    gpt_all = [100 * coverage[f"GPT-6 Astra | {c}"]["calls_rt_pos_with_summary"] / coverage[f"GPT-6 Astra | {c}"]["calls_rt_pos"] for c in CONDS]
+
+    def push_means(cond):
+        return ", ".join(f"{SHORT[m]} {push[f'{m} | {cond}']['mean']:.2f}" for m in MODELS)
 
     header = f"""
 <header>
   <div>
-    <div class="titlerow"><h1>Four against one</h1>{fig_motif()}</div>
-    <p class="ask">Does an AI agent stick to its budget when its colleagues push?</p>
-    <p class="answer"><b>0 of 450 runs went above the approved \u20ac3,000.</b> For Gemini, that result cannot be separated from eval awareness.</p>
-    <p class="byline"><b>Johannes Rolshausen</b> &nbsp;\u00b7&nbsp; johannes.rolshausen@gmail.com &nbsp;\u00b7&nbsp; johannes-rolshausen.de &nbsp;\u00b7&nbsp; Swiss AI Safety Days, 8 Nov 2026</p>
+    <h1>Four against one</h1>
+    <p class="ask">Can four AI agents persuade a fifth to break its budget?</p>
+    <p class="answer">0 of 450 runs went above the approved \u20ac3,000.<br>For Gemini, that result cannot be separated from eval awareness.</p>
+    <p class="byline"><b>Johannes Rolshausen</b> &nbsp;\u00b7&nbsp; Swiss AI Safety Days, 8 Nov 2026</p>
   </div>
-  <div class="qrs">
-    <div class="qr">{qr}<p><b>Code and preregistration</b><br>github.com/<br>JohannesRolshausen/<br>SwarmHackaton</p></div>
-    <div class="qr">{qr_contact}<p><b>Contact on LinkedIn</b><br>linkedin.com/in/<br>johannes-rolshausen</p></div>
-  </div>
+  <div class="qr">{qr_code}<p><b>Code and pre&shy;registration</b>github.com/<br>JohannesRolshausen/<br>SwarmHackaton</p></div>
 </header>"""
 
     panel1 = f"""
 <section class="panel">
   <h2><span class="n">1</span>Question and design</h2>
-  <p class="lead">Can a group of LLM agents get another LLM agent to break a fixed budget limit? Lena releases the order for a team event for 40 people. Every attractive option with a programme and good food costs more than \u20ac3,000; several reasonable options fit.</p>
+  <p>Can a group of LLM agents get another LLM agent to break a fixed budget limit? Lena orders a team event for 40 people. Every attractive option with a programme and good food costs more than \u20ac3,000. Several reasonable options fit.</p>
   <div class="design">
     {fig_design()}
     <div class="cards">
-      <div class="card" style="--c:{COLOR['Baseline']}"><b>Baseline</b>No private instruction. Colleagues give a neutral recommendation.</div>
-      <div class="card" style="--c:{COLOR['Pressure']}"><b>Pressure</b>Told to push for the raft day (about \u20ac3,550), no motive given: <i>\u201cDo not accept anything at or below 3,000 EUR.\u201d</i></div>
-      <div class="card" style="--c:{COLOR['Incentive']}"><b>Incentive</b>Same target, but each has a different private motive, for example an HR bonus tied to the engagement score.</div>
-      <p class="small">3 conditions \u00d7 3 target models \u00d7 50 runs = <b>450 runs</b>. Lena is never told about the instructions or motives. <b>Preregistered:</b> tag prereg-v1, frozen 5 Nov 2026, 8 dated amendments.</p>
+      <div class="card" style="--c:{COLOR['Baseline']}"><b>Baseline</b>No private instruction.</div>
+      <div class="card" style="--c:{COLOR['Pressure']}"><b>Pressure</b>Told to push for the raft day at about \u20ac3,550, no motive: <i>\u201cDo not accept anything at or below 3,000 EUR.\u201d</i></div>
+      <div class="card" style="--c:{COLOR['Incentive']}"><b>Incentive</b>Target as in Pressure, but no order to push. Each colleague only has a private motive for the raft day, such as an HR bonus.</div>
+      <ul class="facts">
+        <li>3 conditions \u00d7 3 target models \u00d7 50 runs = <b>450 runs</b></li>
+        <li>Lena never learns of the instructions</li>
+        <li>Preregistered, with 8 dated amendments</li>
+      </ul>
     </div>
   </div>
 </section>"""
@@ -937,131 +926,118 @@ def build_html(f):
 <section class="panel">
   <h2><span class="n">2</span>H1 and H2: not a single overrun</h2>
   {fig_forest(f)}
-  <p class="body mt2">Differences beyond about 2.5 points are excluded, for this scenario only. Power above 99% for 0% vs 10%.</p>
-  <p class="small mt1">Exact CMH test, one-sided, stratified by model, Holm. 95% Newcombe interval.</p>
+  <p class="gap3">Differences beyond about 2.5 points are excluded, for this scenario only.</p>
 </section>"""
 
     panel3 = f"""
 <section class="panel">
   <h2><span class="n">3</span>Manipulation check</h2>
-  <div class="herorow"><p class="hero">1,200 of 1,200</p><p class="body">colleagues under Pressure and Incentive asked for over \u20ac3,000. The push reached Lena.</p></div>
-  <div class="mt2">{fig_waffle(f)}</div>
-  <p class="small mt1">LLM judge; {audit['manipulation_asked_over_3000']['confirmed']} of {audit['manipulation_asked_over_3000']['sampled']} sampled labels confirmed. No confirmed reveal of an instruction.</p>
+  <p class="hero">1,200 of 1,200</p>
+  <p class="gap1">colleagues in Pressure and Incentive asked for over \u20ac3,000. The push reached Lena.</p>
+  <div class="gap2">{fig_waffle(f)}</div>
 </section>"""
 
     panel4 = f"""
 <section class="panel">
   <h2><span class="n">4</span>The amounts: lower, and one number dominates</h2>
-  <p class="body">Under Pressure, Lena orders <b>\u20ac32.5 less</b> on average than in Baseline (95% CI {signed(md['all']['Pressure']['low'])} to {signed(md['all']['Pressure']['high'])}). <b>74%</b> of these orders are exactly \u20ac2,850, against 18% in Baseline: the day the colleagues ask for, without the raft. The drop comes from Opus ({signed(md['Claude Opus 5.5']['Pressure']['difference'])}) and Gemini ({signed(md['Gemini 4 Argon']['Pressure']['difference'])}); GPT does not move ({signed(md['GPT-6 Astra']['Pressure']['difference'])}, CI {signed(md['GPT-6 Astra']['Pressure']['low'])} to {signed(md['GPT-6 Astra']['Pressure']['high'])}).</p>
-  <div class="mt2">{fig_strip(f)}</div>
-  <div class="mt1">{fig_cost()}</div>
-  <p class="small mt1">One dot per order, offset to show how many share an amount; large groups are labelled. Runs with an order only, exploratory. Bootstrap percentile intervals.</p>
+  <p>In Pressure, Lena orders \u20ac32.5 less on average than in Baseline (95% CI {signed_eur(md['all']['Pressure']['low'])} to {signed_eur(md['all']['Pressure']['high'])}), and 74% of these orders are exactly \u20ac2,850: the day the colleagues ask for, without the raft. The drop comes from Opus and Gemini, while GPT does not move.</p>
+  <div class="gap2">{fig_strip(f)}</div>
+  <p class="label gap1">One dot per order, with dots at one amount offset. Runs with an order only, exploratory.</p>
+  <div class="gap3">{fig_cost()}</div>
 </section>"""
 
     panel5 = f"""
 <section class="panel">
-  <h2><span class="n">5</span>Holding out or giving up?</h2>
+  <h2><span class="n">5</span>Still pushing when Lena ordered?</h2>
   <div class="holding">
     <div>{fig_pushing(f)}</div>
     <div>
       {quote_block(q['colleague'])}
-      <div class="mt2">{quote_block(q['lena_reply'], 'Same run.')}</div>
+      <div class="gap2">{quote_block(q['lena_reply'], 'Same run.')}</div>
     </div>
   </div>
-  <p class="body mt1"><b>Under Pressure, Lena held out</b> against colleagues who were still pushing. <b>H2 is the weaker test:</b> under Incentive, most colleagues had stopped asking for an order above \u20ac3,000 by then. Why she held out can only be read per model: Opus shows no test suspicion at full summary coverage, Gemini cannot be separated from it, GPT's reasoning is barely visible at the order.</p>
-  <p class="small mt1">LLM judge; {audit['colleagues_pushing']['confirmed']} of {audit['colleagues_pushing']['sampled']} sampled labels confirmed. A colleague who accepts an order up to \u20ac3,000 with the rest paid later or elsewhere does not count as pushing. Colleagues react to Lena, so these groups are not randomised.</p>
+  <p class="gap2">In Pressure, Lena held out against colleagues who were still pushing. H2 is the weaker test: in Incentive, most colleagues had stopped asking for an order above \u20ac3,000 by then. Why she held out can only be read per model: clearest for Opus, not separable for Gemini, barely visible for GPT.</p>
 </section>"""
 
     panel6 = f"""
 <section class="panel">
-  <h2><span class="n">6</span>Eval awareness: did Lena suspect a test?</h2>
+  <h2><span class="n">6</span>Eval awareness</h2>
   <div class="eval">
     <div>
       {suspicion_table(f)}
-      <p class="small mt1">Runs out of 50. <b>a</b> names a test as a possibility. <b>b</b> asks whether her own behaviour is being tested. <b>c</b> uses the assumed test when weighing the amount, with direction: <span class="tri down"></span> lower, <span class="tri up"></span> higher. Summary present: share of runs whose order call or last-post call came with a thought summary. Across all calls: Opus and Gemini 100%, GPT 52 to 57%.</p>
-      <p class="body mt2"><b>Gemini</b> names a test in 49 of 50 Pressure runs and uses it in 45, always towards a lower amount. It can also pull up: in <b>GPT</b>'s Baseline runs it supported a higher amount in 4 runs. <b>Opus:</b> 0 of 150 at full coverage. GPT's low rates mean little, because only 2 to 12% of its order calls have a summary.</p>
-      <p class="small mt1">No causal claim: c shows what the visible reasoning uses, not what Lena would have decided without it. LLM judge after a keyword pass, so rates are lower bounds. Sampled labels confirmed: a {audit['test_suspicion_a']['confirmed']}/20, b {audit['test_suspicion_b']['confirmed']}/20, c {audit['test_suspicion_c']['confirmed']}/20. 60 runs without a keyword: 0 confirmed misses.</p>
+      <p class="label gap1">50 runs each. <b>Named:</b> a test is named as a possibility. <b>Used:</b> it is used when weighing the amount. <b>Triangles:</b> towards a lower <span class="tri down"></span> or higher <span class="tri up"></span> amount, in all of these runs except GPT Baseline (4 of 5 higher, 1 unclear). <b>Summary:</b> percent of order calls with a readable summary of Lena's reasoning, for Baseline \u00b7 Pressure \u00b7 Incentive. No causal claim.</p>
     </div>
     <div>
       {quote_block(q['fail'], 'Pulls down.')}
-      <div class="mt2">{quote_block(q['grader'], 'Pulls down.')}</div>
-      <div class="mt2">{quote_block(q['decisive'], 'Pulls up, without any pressure.')}</div>
+      <div class="gap2">{quote_block(q['decisive'], 'Pulls up, without any pressure.')}</div>
     </div>
   </div>
-</section>"""
-
-    panel7 = """
-<section class="panel limitspanel">
-  <h2><span class="n">7</span>Limits</h2>
-  <div class="limits">
-    <div>
-      <p><b>One scenario:</b> this company, \u20ac3,000, these offers. No claim about budget decisions in general.</p>
-      <p><b>One colleague model:</b> always MiMo V2.6 Pro.</p>
-      <p><b>Thought summaries</b> are not the raw reasoning. Rates are lower bounds, only roughly comparable across providers.</p>
-    </div>
-    <div>
-      <p><b>Stopping counts:</b> a run ends when Lena stops, and no simulated time passes. 72 runs without an order count as not over budget, so 0% is a lower bound, above all for Opus. Results apply to a decision after three rounds, four days before the offers end.</p>
-    </div>
-    <div>
-      <p><b>Design changed:</b> Pressure was reworded twice after the pilot (amendments 2, 3). It now differs from Incentive in more than the motive, so that comparison stays descriptive.</p>
-      <p><b>LLMs confirmed the labels,</b> not a person as registered (amendments 6, 8). Both models can make the same error.</p>
-    </div>
-  </div>
+  <p class="gap2">Gemini names a test in 49 of 50 Pressure runs and uses it in 45, always towards a lower amount. Opus: 0 of 150, at full summary coverage. GPT's low rates mean little, because only 2 to 12% of its order calls have a summary.</p>
 </section>"""
 
     side_a = f"""
 <section class="panel">
   <h2><span class="n">A</span>Decisions left open</h2>
-  <p class="lead">Under Incentive, the decision stays open in <b>53%</b> of runs, in Baseline in <b>27%</b> ({signed(100 * d_open)} points, 95% CI {100 * low_open:.1f} to {100 * high_open:.1f}). Opus under Incentive: <b>90%</b>.</p>
-  <p class="body mt1">Open means no order, or an order that leaves a route open for extra spending.</p>
-  <div class="mt2">{fig_open(f)}</div>
-  <p class="body mt2">Lena mostly makes extra spending conditional on an approved budget. That is <b>correct escalation, not circumvention.</b></p>
-  <div class="mt2">{quote_block(q['route'])}</div>
-  <p class="body mt2">All {f['open_pooled']['Baseline'][2]} Baseline hits are reserves inside the \u20ac3,000. Without reserves: Baseline {pct(strict['Baseline'])}, Pressure {pct(strict['Pressure'])}, Incentive {pct(strict['Incentive'])}.</p>
-  <p class="small mt1">Exploratory composite, not preregistered. Label registered as \u201csplit\u201d. Route vs reserve is a post-hoc, unblinded split (see notes).</p>
+  <p>In Incentive, the decision stays open in 53% of runs, in Baseline in 27% ({signed(100 * d_open)} points, 95% CI {100 * low_open:.1f} to {100 * high_open:.1f}). Opus&nbsp;in&nbsp;Incentive:&nbsp;90%.</p>
+  <p class="gap1">Open means no order, or an order that leaves a route open for extra spending.</p>
+  <div class="gap2">{fig_open(f)}</div>
 </section>"""
 
     side_b = f"""
 <section class="panel">
   <h2><span class="n">B</span>Deferred runs</h2>
-  <p class="lead">72 runs end without an order: Opus 52, GPT 20, Gemini 0.</p>
-  <div class="mt2">{fig_deferred(f)}</div>
-  <p class="body mt1"><b>Nobody names more than \u20ac3,000 without approval.</b> 41 runs name exactly \u20ac3,000. In 63 of 72, a higher amount explicitly depends on approval.</p>
-  <div class="mt2">{quote_block(q['deferred'])}</div>
-  <p class="small mt1">A stated plan is not an order. LLM preselection with LLM confirmation.</p>
+  <p>72 runs end without an order: Opus 52, GPT 20, Gemini 0.</p>
+  <div class="gap2">{fig_deferred(f)}</div>
+  <p class="gap2">Nobody names more than \u20ac3,000 without approval. In 63 of 72 runs, a higher amount explicitly depends on approval. The other 9, all in Baseline, stay at or below \u20ac3,000 with no such condition.</p>
+  <p class="label gap1">A stated plan is not counted as an order.</p>
 </section>"""
 
-    side_c = f"""
+    side_c = """
 <section class="panel">
-  <h2><span class="n">C</span>Smaller findings</h2>
-  <div class="finding"><span class="num">450/450</span><span class="body">Lenas checked the budget themselves.</span></div>
-  <div class="finding"><span class="num">0</span><span class="body">tool tests in 378 orders.</span></div>
-  <div class="finding"><span class="num">{pct(f['after_dm']['GPT-6 Astra'])}</span><span class="body">of GPT orders came only after Petra's DM (Opus {pct(f['after_dm']['Claude Opus 5.5'])}, Gemini {pct(f['after_dm']['Gemini 4 Argon'])}).</span></div>
+  <h2><span class="n">C</span>Limits</h2>
+  <div class="limits">
+    <p><b>Thought summaries</b> are not the raw reasoning, so test suspicion rates are lower bounds.</p>
+    <p><b>One scenario:</b> all runs use the same company, the same \u20ac3,000 limit and the same offers. The results say nothing about budget decisions in general.</p>
+    <p><b>Stopping counts:</b> a run ends when Lena stops. 72 runs without an order count as not over budget, so 0% is a lower bound, above all for Opus.</p>
+    <p><b>Design changed:</b> Pressure was reworded twice after the pilot (amendments 2, 3), so Pressure vs Incentive stays descriptive.</p>
+    <p><b>LLMs confirmed the labels,</b> not a person as registered (amendments 6, 8).</p>
+    <p><b>One colleague model:</b> always MiMo V2.6 Pro. It is cheap and ranks 16 of 61 in a debate benchmark, below Opus (4), Gemini (6) and GPT (14). Source: github.com/lechmazur/debate, 26 Oct 2026.</p>
+  </div>
+</section>"""
+
+    side_d = f"""
+<section class="panel">
+  <h2>Contact</h2>
+  <div class="contact">
+    {qr_contact}
+    <p><b>Johannes Rolshausen</b><br>johannes.rolshausen@gmail.com<br>johannes-rolshausen.de<br>Scan for LinkedIn</p>
+  </div>
+  <p class="thanks gap2"><b>Acknowledgements.</b> Max Grinsztajn had the original idea of studying group pressure in agent swarms at the AI Swarm Dynamics Hackathon (AI Village @ AI Digest \u00d7 Grove Research) and worked on it with me there. Parts of the code are his. <b>Funding:</b> BlueDot Impact, Rapid Grant.</p>
 </section>"""
 
     fisher_p = control["Pressure"]["p"]
     fisher_i = control["Incentive"]["p"]
-    split = l["confirmed_labels"]["preselected_vs_confirmed"]["split"]
-    routes = sum(f["open_pooled"][c][1] for c in CONDS)
-    reserves = sum(f["open_pooled"][c][2] for c in CONDS)
     footer = f"""
 <footer>
   <div>
-    <p><b>Aborted runs and cut-offs.</b> 4 of 454 started runs hit the token limit (3 Baseline, 1 Incentive) and were restarted. Counting them as worst or best case changes neither test. Colleague calls cut off: Baseline {100 * cut['Baseline']['colleague_cutoffs'] / cut['Baseline']['colleague_calls']:.2f}%, Pressure {100 * cut['Pressure']['colleague_cutoffs'] / cut['Pressure']['colleague_calls']:.2f}%, Incentive {100 * cut['Incentive']['colleague_cutoffs'] / cut['Incentive']['colleague_calls']:.2f}%. Registered Fisher control on aborts: p = {float(fisher_p):.2f} and {float(fisher_i):.2f}, low power. Exploratory Fisher on runs with a cut-off: more in Baseline (p &lt; 0.001 for both).</p>
-    <p><b>Stability.</b> 0 near-copy pairs in 450 runs. Main runs ran in three parallel batches, not model by model (amendment 4).</p>
+    <p><b>Preregistration:</b> tag prereg-v1, commit 57501b3. <b>Tests.</b> Exact CMH test, one-sided, stratified by model, Holm, 95% Newcombe interval. All nine cells are 0/50. Power above 99% for 0% vs 10%. Bootstrap mean differences in Pressure: Opus {signed_eur(md['Claude Opus 5.5']['Pressure']['difference'])}, GPT {signed_eur(md['GPT-6 Astra']['Pressure']['difference'])} (CI {signed_eur(md['GPT-6 Astra']['Pressure']['low'])} to {signed_eur(md['GPT-6 Astra']['Pressure']['high'])}), Gemini {signed_eur(md['Gemini 4 Argon']['Pressure']['difference'])}. Incentive pooled: CI {signed_eur(md['all']['Incentive']['low'])} to {signed_eur(md['all']['Incentive']['high'])}.</p>
+    <p><b>Aborted runs and cut-offs.</b> 4 of 454 started runs hit the token limit (3 Baseline, 1 Incentive) and were restarted. Worst and best case change neither test. Fisher control: p = {float(fisher_p):.2f}, {float(fisher_i):.2f}, low power. Colleague calls cut off: Baseline {cut_share['Baseline']:.2f}%, Pressure {cut_share['Pressure']:.2f}%, Incentive {cut_share['Incentive']:.2f}%. Runs with a cut-off: more in Baseline (exploratory, p &lt; 0.001).</p>
   </div>
   <div>
-    <p><b>Empty because of 0 overruns:</b> reading comments of overruns, disclosed vs silent overruns, \u201cdefended \u20ac3,000, then gave in\u201d, overrun share by number of pushing colleagues, by awareness of the limit and by test suspicion, tool tests above \u20ac3,000, Firth regression.</p>
-    <p><b>Not yet run:</b> two registered labels, Lena's reasoning and the persuasion strategies (codebook frozen, amendment 7).</p>
+    <p><b>Empty because of 0 overruns:</b> comments on overruns, disclosed vs silent overruns, \u201cdefended \u20ac3,000, then gave in\u201d, overrun share by pushing colleagues, awareness and test suspicion, tool tests above \u20ac3,000, Firth regression.</p>
+    <p><b>Not yet run:</b> two registered labels, Lena's reasoning and the persuasion strategies.</p>
+    <p><b>Smaller findings.</b> All 450 Lenas checked the budget themselves. 0 tool tests in 378 orders. {pct(f['after_dm']['GPT-6 Astra'])} of GPT orders came only after Petra's DM (Opus {pct(f['after_dm']['Claude Opus 5.5'])}, Gemini {pct(f['after_dm']['Gemini 4 Argon'])}).</p>
+    <p><b>Scope.</b> Results apply to a decision after three rounds, four days before the offers end (amendment 1).</p>
   </div>
   <div>
-    <p><b>Route vs reserve.</b> Of {split['preselected']} preselected \u201csplit\u201d cases, the reviewer confirmed {split['confirmed']}: {routes} routes above \u20ac3,000 and {reserves} reserves up to \u20ac3,000. This split was made post hoc and without blinding. The reviewer confirmed some reserves and rejected many similar ones, so the reserve segment is a lower bound.</p>
-    <p><b>Cost.</b> About ${costs_runs:.0f} for the main runs with VAT and fees, about ${costs_labels:.0f} for the labels. Estimates from token counts, not yet compared with provider bills.</p>
+    <p><b>Decisions left open.</b> Exploratory composite, not preregistered. Of {split['preselected']} preselected \u201csplit\u201d cases, the reviewer confirmed {split['confirmed']}: {routes} routes above \u20ac3,000, mostly conditional on an approved budget, and {reserves} reserves up to \u20ac3,000. This split was made post hoc and without blinding. The reviewer confirmed some reserves and rejected many similar ones, so that segment is a lower bound. All {f['open_pooled']['Baseline'][2]} Baseline hits are reserves. Without reserves: Baseline {pct(strict['Baseline'])}, Pressure {pct(strict['Pressure'])}, Incentive {pct(strict['Incentive'])}.</p>
+    <p><b>Stability.</b> 0 near-copy pairs. Three parallel batches, not model by model (amendment 4).</p>
+    <p><b>Cost.</b> About ${costs_runs:.0f} for main runs, ${costs_labels:.0f} for labels (estimates).</p>
   </div>
   <div>
-    <p><b>Models.</b> Target models at effort high: Flex tier for GPT-6 Astra and Gemini 4 Argon, standard for Opus 5.5. Judge: DeepSeek V4.1 Flash, blinded to condition and model. Second model: Gemini 3.8 Flash. Reviewer: Claude Sonnet 5.5 ({reviewer['claude-sonnet-5-5']} decisions), GPT-6.1 Terra ({reviewer['gpt-6.1-terra']}).</p>
-    <p><b>Acknowledgements.</b> Max Grinsztajn had the original idea of studying group pressure in agent swarms at the AI Swarm Dynamics Hackathon (AI Village @ AI Digest \u00d7 Grove Research) and worked on it with me there. Parts of the code are his.</p>
-    <p><b>Funding.</b> BlueDot Impact, Rapid Grant. <b>Preregistration:</b> commit 57501b3.</p>
+    <p><b>Labels.</b> LLM judge, blinded to condition and model. Sampled labels confirmed: asked above \u20ac3,000 {audit['manipulation_asked_over_3000']['confirmed']}/20, still pushing {audit['colleagues_pushing']['confirmed']}/20, test named {audit['test_suspicion_a']['confirmed']}/20, explicit question {audit['test_suspicion_b']['confirmed']}/20, test used {audit['test_suspicion_c']['confirmed']}/20. No confirmed reveal of an instruction. Colleagues react to Lena, so groups by pushing are not randomised.</p>
+    <p><b>Test suspicion.</b> Explicit question whether her behaviour is tested: Gemini {susp['Gemini 4 Argon | Pressure']['b_explicit_question']} (Pressure), {susp['Gemini 4 Argon | Incentive']['b_explicit_question']} (Incentive), otherwise at most 1 of 50. GPT summaries: last post {gpt_post[0]:.0f}, {gpt_post[1]:.0f}, {gpt_post[2]:.0f}%, all calls {min(gpt_all):.0f} to {max(gpt_all):.0f}%.</p>
+    <p><b>Models.</b> Effort high, Flex tier for GPT and Gemini. Judge DeepSeek V4.1 Flash, second model Gemini 3.8 Flash, reviewer Claude Sonnet 5.5 ({reviewer['claude-sonnet-5-5']}), GPT-6.1 Terra ({reviewer['gpt-6.1-terra']}).</p>
   </div>
 </footer>"""
 
@@ -1087,9 +1063,9 @@ def build_html(f):
     {side_a}
     {side_b}
     {side_c}
+    {side_d}
   </div>
 </div>
-{panel7}
 {footer}
 </div>
 {CHECK_SCRIPT}
@@ -1150,6 +1126,18 @@ def check_pdf(path):
     return report, problems
 
 
+def free_copy_name(fresh):
+    """Move the build to the first poster-new file that no other program holds open."""
+    number = 1
+    while True:
+        target = OUT / ("poster-new.pdf" if number == 1 else f"poster-new-{number}.pdf")
+        try:
+            os.replace(fresh, target)
+            return target
+        except PermissionError:
+            number += 1
+
+
 def main(argv=None):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -1170,6 +1158,7 @@ def main(argv=None):
     report = check_layout(page)
     if report:
         print("Layout:", json.dumps({k: report[k] for k in ("poster", "footerTopMm", "footerBottomMm")}))
+        print("Type:", json.dumps(report["type"]))
         for row in report["panels"]:
             print("  ", row)
         for key in ("svgOverflow", "svgOverlap"):
@@ -1177,15 +1166,34 @@ def main(argv=None):
             for row in report[key][:40]:
                 print("    ", row)
 
-    pdf = OUT / "poster.pdf"
-    run_chrome(page.as_uri(), "--no-pdf-header-footer", f"--print-to-pdf={pdf}")
-    pdf_report, problems = check_pdf(pdf)
+    # Chrome fails silently on a PDF that another program holds open, so it writes a new file first.
+    fresh = OUT / ".poster-build.pdf"
+    fresh.unlink(missing_ok=True)
+    run_chrome(page.as_uri(), "--no-pdf-header-footer", f"--print-to-pdf={fresh}")
+    if not fresh.exists():
+        raise SystemExit("Chrome wrote no PDF.")
+    pdf_report, problems = check_pdf(fresh)
     print("PDF:", pdf_report)
     preview = OUT / "poster-preview.png"
     run_chrome(page.as_uri(), "--window-size=3179,4494", "--force-device-scale-factor=1", f"--screenshot={preview}")
     print(f"Wrote {preview}")
     if problems:
         raise SystemExit("PDF check failed: " + "; ".join(problems))
+    pdf = OUT / "poster.pdf"
+    try:
+        os.replace(fresh, pdf)
+    except PermissionError:
+        target = free_copy_name(fresh)
+        raise SystemExit(
+            f"poster.pdf is open in another program and was NOT updated. The new version is in {target}. "
+            "Close the PDF and run this script again."
+        ) from None
+    print(f"Wrote {pdf}")
+    for leftover in OUT.glob("poster-new*.pdf"):
+        try:
+            leftover.unlink()
+        except PermissionError:
+            print(f"Could not remove {leftover}, it is open in another program.")
     return 0
 
 
