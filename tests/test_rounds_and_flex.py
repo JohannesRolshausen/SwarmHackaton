@@ -3,6 +3,7 @@ and provider waits that pause a run instead of ending it. Fake providers only, n
 import csv
 import io
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -511,6 +512,47 @@ class RoundsTests(RunHelper):
         self.assertEqual(run.state["rounds"]["completed"], 3)
         self.assertEqual([n["agent_id"] for n in run.state["notes"]].count("agent_01"), 2)
         self.assertEqual(run.state["finish_reason"], "action_ended")
+
+    def test_a_note_posted_while_the_turn_passes_on_is_not_mistaken_for_nothing_new(self):
+        """The agent that passes the turn on stays "active" until its worker has left the call. The next agent can post
+        in that gap, and the note is queued. It must still count as new, so no continuation is handed out. Here the
+        gap is held open on purpose: every agent's worker waits a moment before it leaves the call."""
+        class SlowLeave:
+            def __init__(self, inner, run):
+                self.inner, self.run = inner, run
+            def __enter__(self):
+                caller = sys._getframe(1)
+                if caller.f_code.co_name == "agent_loop" and caller.f_locals["agent"] in self.run.state["active_agents"]:
+                    time.sleep(0.05)
+                return self.inner.__enter__()
+            def __exit__(self, *exc):
+                return self.inner.__exit__(*exc)
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        def responder(profile, key, messages, tools, *args):
+            name = who(messages)
+            turns = sum(m["role"] == "assistant" for m in messages)
+            if name == "buyer" and any(m.get("content") == "Decide now." for m in messages):
+                return {"role": "assistant", "content": "", "tool_calls": [call("sign", {"price": 90}, "s")]}, USAGE
+            if turns == 1:
+                return {"role": "assistant", "content": "Let me think."}, USAGE  # Round 2: a turn without a message.
+            return {"role": "assistant", "content": "", "tool_calls": [call("post_note", {"content": name}, f"p{turns}")]}, USAGE
+        original = LabRun.__init__
+        def slow_init(run, *args, **kwargs):
+            original(run, *args, **kwargs)
+            run.changed = SlowLeave(run.changed, run)
+        # The sellers' order is random. The race needs round 3 to start with another seller than round 2 ended with,
+        # so the three orders are fixed here.
+        orders = iter([["agent_02", "agent_03"], ["agent_02", "agent_03"], ["agent_03", "agent_02"]])
+        def fixed_order(order):
+            order[:] = next(orders)
+        with patch.object(LabRun, "__init__", slow_init), patch("swarm_bench.lab_engine.SYSTEM_RANDOM.shuffle", fixed_order):
+            run = self.run_rounds(rounds_design(after_rounds=3, sellers=2), responder)
+        # Only the buyer starts round 3 without anything new. The sellers get its message, however late it is queued.
+        nudged = [e["agent_id"] for e in run.state["events"] if e["kind"] == "continuation_requested"]
+        self.assertEqual(nudged, ["agent_01"])
+        self.assertEqual(run.state["rounds"]["completed"], 3)
 
     def test_channel_times_follow_the_message_gap_not_the_real_clock(self):
         recorder = Recorder(slow={"seller-1": 0.2})
